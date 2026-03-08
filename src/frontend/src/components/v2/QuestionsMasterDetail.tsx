@@ -1,5 +1,5 @@
 import React from 'react'
-import { Search, Clock, MessageSquare, Play, RefreshCw, File, Terminal, Monitor, MessageCircle, Zap, Database, TrendingUp, CheckCircle, Star, AlertTriangle, Code } from 'lucide-react'
+import { Search, Clock, MessageSquare, RefreshCw, File, Terminal, Monitor, MessageCircle, Zap, Database, TrendingUp, CheckCircle, Star, AlertTriangle, Code } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Question } from '../../types/dashboard'
@@ -88,10 +88,9 @@ function QuestionListCard({ question, index, isSelected, onClick }: {
 
 // ── Detail Panel ─────────────────────────────────────────────────────────────
 
-function QuestionDetail({ question, index, onStartInterview, onRegenerate, isLoadingQuestions, expandedCode, onToggleCode }: {
+function QuestionDetail({ question, index, onRegenerate, isLoadingQuestions, expandedCode, onToggleCode }: {
   question: Question
   index: number
-  onStartInterview: () => void
   onRegenerate: () => void
   isLoadingQuestions: boolean
   expandedCode: boolean
@@ -119,10 +118,6 @@ function QuestionDetail({ question, index, onStartInterview, onRegenerate, isLoa
           <button className="v2-btn v2-btn-outline v2-btn-sm" onClick={onRegenerate} disabled={isLoadingQuestions}>
             <RefreshCw className="v2-btn-icon" />
             질문 재생성
-          </button>
-          <button className="v2-btn v2-btn-primary v2-btn-sm" onClick={onStartInterview} disabled={isLoadingQuestions}>
-            <Play className="v2-btn-icon" />
-            이 질문으로 모의면접 시작
           </button>
         </div>
       </div>
@@ -206,7 +201,6 @@ interface QuestionsMasterDetailProps {
   questions: Question[]
   selectedId: string | null
   onSelect: (id: string | null) => void
-  onStartInterview: () => void
   onRegenerate: () => void
   isLoadingQuestions: boolean
   filterSearch: string
@@ -220,7 +214,7 @@ interface QuestionsMasterDetailProps {
 
 export function QuestionsMasterDetail({
   questions, selectedId, onSelect,
-  onStartInterview, onRegenerate, isLoadingQuestions,
+  onRegenerate, isLoadingQuestions,
   filterSearch, filterCategory, filterDifficulty,
   onFilterSearch, onFilterCategory, onFilterDifficulty,
   totalCount,
@@ -316,16 +310,6 @@ export function QuestionsMasterDetail({
               ))
             )}
           </div>
-          <div className="v2-qmd-list-cta">
-            <button
-              className="v2-btn v2-btn-primary v2-btn-sm v2-qmd-start-btn"
-              onClick={onStartInterview}
-              disabled={isLoadingQuestions || questions.length === 0}
-            >
-              <Play className="v2-btn-icon" />
-              {isLoadingQuestions ? '질문 준비 중...' : '면접 시작하기'}
-            </button>
-          </div>
         </div>
 
         {/* Right: Detail */}
@@ -334,7 +318,6 @@ export function QuestionsMasterDetail({
             <QuestionDetail
               question={selectedQuestion}
               index={selectedIndex}
-              onStartInterview={onStartInterview}
               onRegenerate={onRegenerate}
               isLoadingQuestions={isLoadingQuestions}
               expandedCode={expandedCode}

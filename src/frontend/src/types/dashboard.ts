@@ -121,6 +121,24 @@ export interface RecentAnalysis {
   primary_language: string
 }
 
+export interface RecentReport {
+  interview_id: string
+  repository_name: string
+  repository_owner: string
+  overall_score: number
+  completed_at: string
+  duration_minutes: number
+  questions_count: number
+  answers_count: number
+  category_scores: Record<string, number>
+  difficulty_level: string
+}
+
+export interface QuickAccessData {
+  recent_analyses: RecentAnalysis[]
+  recent_reports: RecentReport[]
+}
+
 export type DifficultyLevel = 'easy' | 'medium' | 'hard' | 'beginner' | 'intermediate' | 'advanced' | 'normal' | 'low' | 'high'
 export type TabType = 'questions' | 'graph'
 export type CategoryFilter = 'all' | 'technical' | 'architectural' | 'scenario' | 'algorithm' | 'system-design' | 'code-review' | 'best-practices' | 'debugging'

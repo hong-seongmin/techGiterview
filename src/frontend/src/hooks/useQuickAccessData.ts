@@ -1,33 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-
-interface RecentAnalysis {
-  analysis_id: string
-  analysis_token?: string
-  repository_name: string
-  repository_owner: string
-  created_at: string
-  tech_stack: string[]
-  file_count: number
-  primary_language: string
-}
-
-interface RecentReport {
-  interview_id: string
-  repository_name: string
-  repository_owner: string
-  overall_score: number
-  completed_at: string
-  duration_minutes: number
-  questions_count: number
-  answers_count: number
-  category_scores: Record<string, number>
-  difficulty_level: string
-}
-
-interface QuickAccessData {
-  recent_analyses: RecentAnalysis[]
-  recent_reports: RecentReport[]
-}
+import type { QuickAccessData } from '../types/dashboard'
 
 interface UseQuickAccessDataResult {
   data: QuickAccessData

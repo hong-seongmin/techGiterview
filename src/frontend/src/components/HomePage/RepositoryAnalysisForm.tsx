@@ -59,7 +59,7 @@ export const RepositoryAnalysisForm: React.FC<RepositoryAnalysisFormProps> = ({
             </>
           ) : (
             <>
-              Analyze
+              분석 시작
               <span aria-hidden="true">→</span>
             </>
           )}
