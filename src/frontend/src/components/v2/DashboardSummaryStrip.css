@@ -1,20 +1,21 @@
 .dashboard-summary-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 12px;
+  padding: 12px 14px;
   border: 1px solid var(--v2-border);
-  border-radius: 14px;
-  background: rgba(15, 23, 42, 0.56);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0.01)), rgba(15, 23, 42, 0.62);
+  box-shadow: var(--v2-709-soft-shadow);
 }
 
 .dashboard-summary-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   min-width: 0;
-  padding: 6px 8px;
-  border-radius: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
 }
 
 .dashboard-summary-item strong {

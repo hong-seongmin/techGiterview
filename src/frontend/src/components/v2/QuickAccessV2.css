@@ -1,7 +1,7 @@
 .v2-qa {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
 }
 
 .v2-qa-header h2 {
@@ -22,17 +22,17 @@
 .v2-qa-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  gap: 18px;
 }
 
 .v2-qa-card {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent), var(--v2-709-surface, var(--v2-bg-surface));
   border: 1px solid var(--v2-border);
   border-radius: var(--v2-709-card-radius, 16px);
-  padding: var(--v2-709-card-padding, 20px);
+  padding: var(--v2-709-card-padding, 22px);
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   box-shadow: var(--v2-709-card-shadow, var(--v2-shadow-md));
   transition: border-color var(--v2-trans-fast), box-shadow var(--v2-trans-base), transform var(--v2-trans-fast);
 }
@@ -91,7 +91,7 @@
   border: 1px solid var(--v2-border);
   border-radius: 13px;
   background: rgba(15, 23, 42, 0.75);
-  padding: 12px 13px;
+  padding: 13px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -124,7 +124,7 @@
 .v2-qa-item-meta {
   display: flex;
   gap: 7px;
-  margin-top: 7px;
+  margin-top: 8px;
   flex-wrap: wrap;
 }
 

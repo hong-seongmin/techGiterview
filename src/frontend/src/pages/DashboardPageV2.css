@@ -147,10 +147,10 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 0 max(16px, var(--v2-709-gutter));
-  min-height: var(--v2-709-header-h);
-  background: var(--v2-709-header-bg);
+  gap: 18px;
+  padding: 0 max(18px, var(--v2-709-gutter));
+  min-height: calc(var(--v2-709-header-h) + 4px);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.82));
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--v2-border);
@@ -160,7 +160,7 @@
 .dashboard-v2-header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .dashboard-v2-header-main {
@@ -172,7 +172,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .dashboard-v2-repo-title-row {
@@ -185,7 +185,7 @@
 .dashboard-v2-repo-title-row h1 {
   margin: 0;
   color: var(--v2-text-hi);
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -201,7 +201,7 @@
 .dashboard-v2-repo-inline-stats {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
@@ -209,8 +209,8 @@
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--v2-border);
-  border-radius: 12px;
-  background: rgba(15, 23, 42, 0.5);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.62);
   overflow: hidden;
 }
 
@@ -218,8 +218,8 @@
   border: 0;
   background: transparent;
   color: var(--v2-text-muted);
-  height: 34px;
-  padding: 0 12px;
+  height: 36px;
+  padding: 0 14px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -228,24 +228,24 @@
 }
 
 .dashboard-v2-view-btn--active {
-  background: rgba(59, 130, 246, 0.14);
+  background: rgba(59, 130, 246, 0.16);
   color: var(--v2-text-hi);
 }
 
 .dashboard-v2-main {
   width: min(var(--v2-709-container-max), calc(100% - (var(--v2-709-gutter) * 2)));
   margin: 0 auto;
-  padding: 16px 0 20px;
+  padding: 18px 0 28px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   min-height: calc(100vh - var(--v2-709-header-h));
 }
 
 .dashboard-v2-graph-shell {
   min-height: 420px;
   border: 1px solid var(--v2-border);
-  border-radius: var(--v2-709-card-radius);
+  border-radius: var(--v2-709-card-radius-lg);
   overflow: hidden;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.016), transparent), var(--v2-709-surface);
   box-shadow: var(--v2-709-soft-shadow);
@@ -284,8 +284,8 @@
   .dashboard-v2-header {
     flex-direction: column;
     align-items: stretch;
-    padding-top: 10px;
-    padding-bottom: 10px;
+    padding-top: 12px;
+    padding-bottom: 12px;
   }
 
   .dashboard-v2-header-actions {
