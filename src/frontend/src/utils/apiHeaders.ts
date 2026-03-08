@@ -4,6 +4,7 @@ export const API_STORAGE_KEYS = {
   GITHUB_TOKEN: 'techgiterview_github_token',
   GOOGLE_API_KEY: 'techgiterview_google_api_key',
   UPSTAGE_API_KEY: 'techgiterview_upstage_api_key',
+  SELECTED_AI_ID: 'techgiterview_selected_ai_id',
   SELECTED_AI_PROVIDER: 'techgiterview_selected_ai_provider',
   ANALYSIS_TOKEN_PREFIX: 'techgiterview_analysis_token_',
   INTERVIEW_TOKEN_PREFIX: 'techgiterview_interview_token_',
@@ -14,6 +15,7 @@ export interface StoredApiKeys {
   githubToken: string
   googleApiKey: string
   upstageApiKey: string
+  selectedAIId: string
   selectedProvider: AIProviderType
 }
 
@@ -43,6 +45,7 @@ export const getApiKeysFromStorage = (): StoredApiKeys => {
       githubToken: localStorage.getItem(API_STORAGE_KEYS.GITHUB_TOKEN) || '',
       googleApiKey: localStorage.getItem(API_STORAGE_KEYS.GOOGLE_API_KEY) || '',
       upstageApiKey: localStorage.getItem(API_STORAGE_KEYS.UPSTAGE_API_KEY) || '',
+      selectedAIId: localStorage.getItem(API_STORAGE_KEYS.SELECTED_AI_ID) || '',
       selectedProvider: normalizeProvider(
         localStorage.getItem(API_STORAGE_KEYS.SELECTED_AI_PROVIDER)
       ),
@@ -52,8 +55,23 @@ export const getApiKeysFromStorage = (): StoredApiKeys => {
       githubToken: '',
       googleApiKey: '',
       upstageApiKey: '',
+      selectedAIId: '',
       selectedProvider: 'upstage',
     }
+  }
+}
+
+export const persistSelectedAI = (selectedAIId: string): void => {
+  if (!selectedAIId) return
+
+  try {
+    localStorage.setItem(API_STORAGE_KEYS.SELECTED_AI_ID, selectedAIId)
+    localStorage.setItem(
+      API_STORAGE_KEYS.SELECTED_AI_PROVIDER,
+      getProviderFromSelectedAI(selectedAIId)
+    )
+  } catch {
+    // ignore localStorage errors
   }
 }
 

@@ -35,8 +35,10 @@ class QuestionState:
 class QuestionGenerator:
     """기술면접 질문 생성 에이전트"""
     
-    def __init__(self):
+    def __init__(self, preferred_provider: Optional[AIProvider] = None):
         # self.vector_db = VectorDBService()
+        self.preferred_provider = preferred_provider
+        self.api_keys: Dict[str, str] = {}
         
         # Google Gemini LLM 초기화
         self.llm = get_gemini_llm()
@@ -57,6 +59,9 @@ class QuestionGenerator:
             "medium": (3.0, 6.0), 
             "hard": (6.0, 10.0)
         }
+
+    def _resolve_provider(self) -> Optional[AIProvider]:
+        return self.preferred_provider
     
     async def generate_questions(
         self, 
@@ -1254,11 +1259,11 @@ class QuestionGenerator:
         
         print(f"[QUESTION_GEN] ========== 코드 분석 질문 생성 상세 로그 ==========\n대상 파일: {file_path}\n파일 유형: {file_type}")
         
-        # Gemini 기반 질문 생성
+        # 선택된 provider 기반 질문 생성
         try:
             ai_response = await ai_service.generate_analysis(
                 prompt=prompt,
-                provider=AIProvider.GEMINI_FLASH,
+                provider=self._resolve_provider(),
                 api_keys=self.api_keys
             )
             
@@ -1266,14 +1271,14 @@ class QuestionGenerator:
             if ai_response and "content" in ai_response and ai_response["content"]:
                 ai_question = ai_response["content"].strip()
                 if ai_question:  # 빈 응답이 아닌 경우
-                    print(f"[QUESTION_GEN] Gemini 코드분석 질문 생성 성공: {ai_question[:100]}...")
+                    print(f"[QUESTION_GEN] AI 코드분석 질문 생성 성공: {ai_question[:100]}...")
                 else:
                     raise ValueError("AI 응답이 비어있음")
             else:
                 raise ValueError("AI 응답이 None이거나 content가 없음")
                 
         except Exception as e:
-            print(f"[QUESTION_GEN] Gemini 코드분석 질문 생성 실패: {e}, fallback 질문 사용")
+            print(f"[QUESTION_GEN] AI 코드분석 질문 생성 실패: {e}, fallback 질문 사용")
             # Fallback 질문 생성
             ai_question = self._generate_fallback_code_question(snippet, state)
         
@@ -1323,7 +1328,11 @@ class QuestionGenerator:
         print(f"[QUESTION_GEN] ========== 기술 스택 질문 생성: {tech} ==========\n파일 컨텍스트 길이: {len(file_context)} 문자")
         
         try:
-            ai_response = await ai_service.generate_analysis(prompt, api_keys=self.api_keys)
+            ai_response = await ai_service.generate_analysis(
+                prompt,
+                provider=self._resolve_provider(),
+                api_keys=self.api_keys
+            )
             
             # AI 응답 null 체크 및 fallback 처리
             if ai_response and "content" in ai_response and ai_response["content"]:
@@ -1336,7 +1345,7 @@ class QuestionGenerator:
                 raise ValueError("AI 응답이 None이거나 content가 없음")
                 
         except Exception as e:
-            print(f"[QUESTION_GEN] Gemini 질문 생성 실패: {e}, fallback 질문 사용")
+            print(f"[QUESTION_GEN] AI 질문 생성 실패: {e}, fallback 질문 사용")
             # Fallback 질문 생성
             ai_question = f"이 프로젝트에서 {tech} 기술을 사용한 이유와 구현 방식에 대해 설명해주세요. 특히 다른 기술 대비 장점과 프로젝트에 적합한 이유를 중심으로 답변해주세요."
         
@@ -1415,7 +1424,11 @@ class QuestionGenerator:
         print(f"[QUESTION_GEN] ========== 아키텍처 질문 생성 ==========\n컨텍스트: {architecture_context}")
         
         try:
-            ai_response = await ai_service.generate_analysis(prompt, api_keys=self.api_keys)
+            ai_response = await ai_service.generate_analysis(
+                prompt,
+                provider=self._resolve_provider(),
+                api_keys=self.api_keys
+            )
             
             # AI 응답 null 체크 및 fallback 처리
             if ai_response and "content" in ai_response and ai_response["content"]:
@@ -1428,7 +1441,7 @@ class QuestionGenerator:
                 raise ValueError("AI 응답이 None이거나 content가 없음")
                 
         except Exception as e:
-            print(f"[QUESTION_GEN] Gemini 아키텍처 질문 생성 실패: {e}, fallback 질문 사용")
+            print(f"[QUESTION_GEN] AI 아키텍처 질문 생성 실패: {e}, fallback 질문 사용")
             # Fallback 질문 생성
             ai_question = "이 프로젝트의 전체적인 아키텍처 설계와 주요 구성 요소들의 역할에 대해 설명해주세요. 특히 확장성과 유지보수성을 고려한 설계 결정이 있다면 함께 설명해주세요."
         

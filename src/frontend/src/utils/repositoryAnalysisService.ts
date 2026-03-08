@@ -50,6 +50,7 @@ export const handleRepositoryAnalysis = async (
       body: JSON.stringify({
         repo_url: repoUrl,
         selected_ai: selectedAI,
+        selected_provider_id: selectedAI,
       }),
     });
 

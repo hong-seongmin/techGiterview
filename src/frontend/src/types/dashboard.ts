@@ -37,6 +37,7 @@ export interface SmartFileAnalysis {
 export interface AnalysisResult {
   success: boolean
   analysis_id: string
+  selected_provider_id?: string
   repo_info: RepositoryInfo
   tech_stack: Record<string, number>
   key_files: FileInfo[]
@@ -129,7 +130,6 @@ export type LoadingStepStatus = 'pending' | 'active' | 'done' | 'failed'
 
 export type LoadingStageKey =
   | 'analysis_fetch'
-  | 'graph_fetch'
   | 'files_fetch'
   | 'questions_check'
   | 'questions_generate'

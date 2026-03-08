@@ -84,6 +84,29 @@ const sanitizeQuestions = (items: Question[]): Question[] => {
   return deduped
 }
 
+type GraphStatus = 'idle' | 'loading' | 'loaded' | 'unsupported' | 'error'
+type QuestionLoadSource = 'cache' | 'generated' | 'generation_wait'
+type QuestionLoadResult = {
+  questions: Question[]
+  source: QuestionLoadSource
+}
+
+const inflightRequests = new Map<string, Promise<unknown>>()
+
+const dedupeAsync = <T,>(key: string, factory: () => Promise<T>): Promise<T> => {
+  const existing = inflightRequests.get(key) as Promise<T> | undefined
+  if (existing) {
+    return existing
+  }
+
+  const next = factory().finally(() => {
+    inflightRequests.delete(key)
+  })
+
+  inflightRequests.set(key, next)
+  return next
+}
+
 // 파일 확장자에 따른 React 아이콘 컴포넌트 반환
 const getFileIcon = (filePath: string): React.ReactNode => {
   const extension = filePath.split('.').pop()?.toLowerCase()
@@ -187,6 +210,7 @@ export function useDashboard(analysisId: string | undefined) {
   // Graph State
   const [graphData, setGraphData] = useState<any>(null)
   const [isLoadingGraph, setIsLoadingGraph] = useState(false)
+  const [graphStatus, setGraphStatus] = useState<GraphStatus>('idle')
 
   // 전체 분석 목록을 위한 상태
   const [allAnalyses, setAllAnalyses] = useState<RecentAnalysis[]>([])
@@ -206,7 +230,7 @@ export function useDashboard(analysisId: string | undefined) {
   }
   const [allFiles, setAllFiles] = useState<FileTreeNode[]>([])
   const [isLoadingAllFiles, setIsLoadingAllFiles] = useState(false)
-  const [showAllFiles, setShowAllFiles] = useState(true)
+  const [showAllFiles, setShowAllFiles] = useState(false)
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
   const [searchTerm, setSearchTerm] = useState('')
   const [filteredFiles, setFilteredFiles] = useState<FileTreeNode[]>([])
@@ -238,6 +262,19 @@ export function useDashboard(analysisId: string | undefined) {
     return createApiHeaders({ includeApiKeys })
   }
 
+  const resolveSelectedProviderId = (analysis?: AnalysisResult | null): string => {
+    if (analysis?.selected_provider_id) {
+      return analysis.selected_provider_id
+    }
+
+    const { selectedAIId, selectedProvider } = getApiKeysFromStorage()
+    if (selectedAIId) {
+      return selectedAIId
+    }
+
+    return selectedProvider === 'gemini' ? 'gemini-flash' : 'upstage-solar-pro3'
+  }
+
   const storeIssuedAnalysisToken = (targetAnalysisId: string, response: Response, body?: any): void => {
     const issuedToken = response.headers.get('X-Analysis-Token') || body?.security?.analysis_token
     if (issuedToken) {
@@ -267,6 +304,25 @@ export function useDashboard(analysisId: string | undefined) {
       loadAllAnalyses()
     }
   }, [analysisId, navigate])
+
+  useEffect(() => {
+    if (!analysisId) {
+      return
+    }
+
+    setAnalysisResult(null)
+    setQuestions([])
+    setQuestionsGenerated(false)
+    setSelectedQuestionId(null)
+    setGraphData(null)
+    setGraphStatus('idle')
+    setAllFiles([])
+    setFilteredFiles([])
+    setShowAllFiles(false)
+    setExpandedFolders(new Set())
+    setSearchTerm('')
+    setError(null)
+  }, [analysisId])
 
   // 파일 트리 정렬 완료 - 더 이상 복잡한 분석 불필요
   useEffect(() => {
@@ -391,48 +447,38 @@ export function useDashboard(analysisId: string | undefined) {
         )
       }
       console.log('[Dashboard] Making fetch request...')
-      const response = await apiFetch(`/api/v1/repository/analysis/${analysisIdToLoad}`, {
-        headers: getAnalysisAwareHeaders(analysisIdToLoad, false)
-      })
-      console.log('[Dashboard] Response received:', {
-        status: response.status,
-        statusText: response.statusText,
-        url: response.url,
-        headers: Object.fromEntries(response.headers.entries())
-      })
-
-      if (response.status === 202) {
-        // 분석이 아직 진행 중
-        const result = await response.json()
-        console.log('[Dashboard] ⏳ Analysis still in progress:', result)
-        hasFailure = true
-        setLoadingProgress((prev) =>
-          failLoadingStep(
-            prev,
-            'analysis_fetch',
-            `분석이 아직 완료되지 않았습니다: ${result.detail || '진행 중'}`
-          )
-        )
-        setError(`분석이 진행 중입니다. 상태: ${result.detail}`)
-        return
-      }
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        console.error('[Dashboard] API error response:', {
+      const result = await dedupeAsync(`analysis:${analysisIdToLoad}`, async () => {
+        const response = await apiFetch(`/api/v1/repository/analysis/${analysisIdToLoad}`, {
+          headers: getAnalysisAwareHeaders(analysisIdToLoad, false)
+        })
+        console.log('[Dashboard] Response received:', {
           status: response.status,
           statusText: response.statusText,
-          errorText
+          url: response.url,
+          headers: Object.fromEntries(response.headers.entries())
         })
-        hasFailure = true
-        setLoadingProgress((prev) =>
-          failLoadingStep(prev, 'analysis_fetch', `분석 결과 조회 실패 (HTTP ${response.status})`)
-        )
-        throw new Error(`HTTP ${response.status}: ${errorText}`)
-      }
 
-      const result = await response.json()
-      storeIssuedAnalysisToken(analysisIdToLoad, response, result)
+        if (response.status === 202) {
+          const pending = await response.json()
+          const detail = pending?.detail || '진행 중'
+          throw new Error(`__ANALYSIS_PENDING__:${detail}`)
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          console.error('[Dashboard] API error response:', {
+            status: response.status,
+            statusText: response.statusText,
+            errorText
+          })
+          throw new Error(`HTTP ${response.status}: ${errorText}`)
+        }
+
+        const payload = await response.json()
+        storeIssuedAnalysisToken(analysisIdToLoad, response, payload)
+        return payload as AnalysisResult
+      })
+
       console.log('[Dashboard] Analysis result loaded successfully:', {
         analysis_id: result.analysis_id,
         repo_name: result.repo_info?.name,
@@ -446,66 +492,23 @@ export function useDashboard(analysisId: string | undefined) {
         completeLoadingStep(prev, 'analysis_fetch', `${result.repo_info?.owner || ''}/${result.repo_info?.name || ''} 분석 결과를 확인했습니다`)
       )
 
-      // Load Graph Data
       setLoadingProgress((prev) =>
-        activateLoadingStep(prev, 'graph_fetch', '코드 의존성 그래프를 생성하는 중입니다')
+        activateLoadingStep(prev, 'files_fetch', '핵심 파일 요약을 정리하는 중입니다')
       )
-      const graphLoaded = await fetchGraphData(result.analysis_id)
+      setAllFiles([])
+      setFilteredFiles([])
+      setShowAllFiles(false)
+      setExpandedFolders(new Set())
       setLoadingProgress((prev) =>
-        graphLoaded
-          ? completeLoadingStep(prev, 'graph_fetch', '코드 그래프 로딩이 완료되었습니다')
-          : failLoadingStep(prev, 'graph_fetch', '코드 그래프 로딩에 실패했습니다')
+        completeLoadingStep(
+          prev,
+          'files_fetch',
+          `핵심 파일 ${result.key_files?.length || 0}개를 분석 결과에서 확인했습니다`
+        )
       )
 
-      // 자동으로 전체 파일 목록 로드
-      setLoadingProgress((prev) =>
-        activateLoadingStep(prev, 'files_fetch', '핵심 파일 목록을 불러오는 중입니다')
-      )
-      try {
-        const filesResponse = await apiFetch(`/api/v1/repository/analysis/${result.analysis_id}/all-files?max_depth=3&max_files=500`, {
-          headers: getAnalysisAwareHeaders(result.analysis_id, false)
-        })
-        storeIssuedAnalysisToken(result.analysis_id, filesResponse)
-        if (filesResponse.ok) {
-          const files = await filesResponse.json()
-          setAllFiles(files)
-          setFilteredFiles(files)
-          setShowAllFiles(true)
-          // 최상위 폴더만 펼치기 (스크롤 압박 해소)
-          const topLevelFolders = new Set<string>()
-          files.forEach((node: FileTreeNode) => {
-            if (node.type === 'dir') {
-              topLevelFolders.add(node.path)
-            }
-          })
-          setExpandedFolders(topLevelFolders)
-          setLoadingProgress((prev) =>
-            completeLoadingStep(prev, 'files_fetch', `핵심 파일 ${files.length}개를 로딩했습니다`)
-          )
-        } else {
-          setLoadingProgress((prev) =>
-            failLoadingStep(prev, 'files_fetch', `핵심 파일 로딩 실패 (HTTP ${filesResponse.status})`)
-          )
-        }
-      } catch (error) {
-        console.error('Error loading all files:', error)
-        setLoadingProgress((prev) =>
-          failLoadingStep(prev, 'files_fetch', '핵심 파일 로딩 중 오류가 발생했습니다')
-        )
-      }
-
-      // 질문이 아직 생성되지 않았다면 자동 로드/생성
-      if (!questionsGenerated) {
-        console.log('[Dashboard] Auto-loading questions...')
-        await loadOrGenerateQuestions(result, true)
-      } else {
-        setLoadingProgress((prev) =>
-          completeLoadingStep(prev, 'questions_check', '이미 생성된 질문을 사용합니다')
-        )
-        setLoadingProgress((prev) =>
-          completeLoadingStep(prev, 'questions_generate', '질문 준비가 이미 완료되어 있습니다')
-        )
-      }
+      console.log('[Dashboard] Auto-loading questions...')
+      await loadOrGenerateQuestions(result, true)
     } catch (error) {
       console.error('[Dashboard] Critical error loading analysis:', {
         error,
@@ -513,6 +516,17 @@ export function useDashboard(analysisId: string | undefined) {
         errorStack: error instanceof Error ? error.stack : undefined,
         analysisId: analysisIdToLoad
       })
+
+      if (error instanceof Error && error.message.startsWith('__ANALYSIS_PENDING__:')) {
+        const detail = error.message.replace('__ANALYSIS_PENDING__:', '') || '진행 중'
+        hasFailure = true
+        setLoadingProgress((prev) =>
+          failLoadingStep(prev, 'analysis_fetch', `분석이 아직 완료되지 않았습니다: ${detail}`)
+        )
+        setError(`분석이 진행 중입니다. 상태: ${detail}`)
+        return
+      }
+
       hasFailure = true
       setLoadingProgress((prev) =>
         failLoadingStep(
@@ -539,26 +553,44 @@ export function useDashboard(analysisId: string | undefined) {
 
   const fetchGraphData = async (id: string): Promise<boolean> => {
     setIsLoadingGraph(true)
+    setGraphStatus('loading')
     try {
-      const res = await apiFetch(`/api/v1/repository/analysis/${id}/graph`, {
-        headers: getAnalysisAwareHeaders(id, false)
-      })
-      storeIssuedAnalysisToken(id, res)
-      if (res.ok) {
+      return await dedupeAsync(`graph:${id}`, async () => {
+        const res = await apiFetch(`/api/v1/repository/analysis/${id}/graph`, {
+          headers: getAnalysisAwareHeaders(id, false)
+        })
+        storeIssuedAnalysisToken(id, res)
+
+        if (res.status === 404) {
+          setGraphData(null)
+          setGraphStatus('unsupported')
+          return false
+        }
+
+        if (!res.ok) {
+          setGraphStatus('error')
+          return false
+        }
+
         const data = await res.json()
         setGraphData(data)
-        return true
-      }
-      return false
+        const hasNodes = Array.isArray(data?.nodes) && data.nodes.length > 0
+        setGraphStatus(hasNodes ? 'loaded' : 'unsupported')
+        return hasNodes
+      })
     } catch (e) {
       console.error("Failed to fetch graph data", e)
+      setGraphStatus('error')
       return false
     } finally {
       setIsLoadingGraph(false)
     }
   }
 
-  const loadOrGenerateQuestions = async (analysisToUse: AnalysisResult, trackLoadingProgress: boolean = false) => {
+  const loadOrGenerateQuestions = async (
+    analysisToUse: AnalysisResult,
+    trackLoadingProgress: boolean = false
+  ): Promise<Question[]> => {
     console.log('[Questions] Starting loadOrGenerateQuestions for analysis:', analysisToUse.analysis_id)
     console.log('[Questions] Current questions state:', {
       questionsCount: questions.length,
@@ -579,7 +611,11 @@ export function useDashboard(analysisId: string | undefined) {
       activateLoadingStep(prev, 'questions_check', '기존 질문 캐시를 확인하는 중입니다')
     )
 
-    const waitForGeneratedQuestions = async (analysisIdToPoll: string, maxAttempts: number = 12, delayMs: number = 5000) => {
+    const waitForGeneratedQuestions = async (
+      analysisIdToPoll: string,
+      maxAttempts: number = 12,
+      delayMs: number = 5000
+    ): Promise<QuestionLoadResult> => {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         console.log(`[Questions] ⏳ Waiting for in-progress generation... (${attempt}/${maxAttempts})`)
         updateLoadingIfEnabled((prev) =>
@@ -606,162 +642,157 @@ export function useDashboard(analysisId: string | undefined) {
 
         const pollResult = await pollResponse.json()
         if (pollResult.success && pollResult.questions && pollResult.questions.length > 0) {
-          console.log('[Questions] ✅ In-progress generation completed during polling:', pollResult.questions.length)
-          setQuestions(pollResult.questions)
-          setQuestionsGenerated(true)
-          updateLoadingIfEnabled((prev) =>
-            completeLoadingStep(
-              setLoadingAttempt(prev, attempt, maxAttempts),
-              'questions_generate',
-              `질문 생성이 완료되어 ${pollResult.questions.length}개 질문을 불러왔습니다`
-            )
+          console.log(
+            '[Questions] ✅ In-progress generation completed during polling:',
+            pollResult.questions.length
           )
-          return true
+          return {
+            questions: sanitizeQuestions(pollResult.questions || []),
+            source: 'generation_wait'
+          }
         }
       }
 
-      updateLoadingIfEnabled((prev) =>
-        failLoadingStep(prev, 'questions_generate', '질문 생성 대기 시간이 초과되었습니다')
-      )
-      return false
+      throw new Error('질문 생성 대기 시간이 초과되었습니다')
     }
 
     try {
-      // 먼저 이미 생성된 질문이 있는지 확인
-      const checkUrl = `/api/v1/questions/analysis/${analysisToUse.analysis_id}`
-      console.log('[Questions] Fetching existing questions from:', checkUrl)
+      const result = await dedupeAsync(
+        `questions:${analysisToUse.analysis_id}`,
+        async (): Promise<QuestionLoadResult> => {
+          const checkUrl = `/api/v1/questions/analysis/${analysisToUse.analysis_id}`
+          console.log('[Questions] Fetching existing questions from:', checkUrl)
 
-      const checkResponse = await apiFetch(checkUrl, {
-        method: 'GET',
-        headers: createApiHeaders(false) // 질문 조회는 API 키 불필요
-      })
-      console.log('[Questions] Check response received:', {
-        status: checkResponse.status,
-        statusText: checkResponse.statusText,
-        ok: checkResponse.ok,
-        url: checkResponse.url
-      })
+          const checkResponse = await apiFetch(checkUrl, {
+            method: 'GET',
+            headers: createApiHeaders(false)
+          })
+          console.log('[Questions] Check response received:', {
+            status: checkResponse.status,
+            statusText: checkResponse.statusText,
+            ok: checkResponse.ok,
+            url: checkResponse.url
+          })
 
-      if (checkResponse.ok) {
-        const checkResult = await checkResponse.json()
-        console.log('[Questions] Parsed check result:', {
-          success: checkResult.success,
-          questionsLength: checkResult.questions?.length || 0,
-          questionsExists: !!checkResult.questions,
-          analysisId: checkResult.analysis_id,
-          error: checkResult.error
-        })
+          if (checkResponse.ok) {
+            const checkResult = await checkResponse.json()
+            console.log('[Questions] Parsed check result:', {
+              success: checkResult.success,
+              questionsLength: checkResult.questions?.length || 0,
+              questionsExists: !!checkResult.questions,
+              analysisId: checkResult.analysis_id,
+              error: checkResult.error
+            })
 
-        if (checkResult.success && checkResult.questions && checkResult.questions.length > 0) {
-          // 이미 생성된 질문이 있음
-          console.log('[Questions] Found existing questions, setting state:', checkResult.questions.length)
-          setQuestions(checkResult.questions)
-          setQuestionsGenerated(true)
-          updateLoadingIfEnabled((prev) =>
-            completeLoadingStep(
-              completeLoadingStep(
-                prev,
-                'questions_check',
-                `기존 질문 ${checkResult.questions.length}개를 캐시에서 확인했습니다`
-              ),
-              'questions_generate',
-              '추가 생성 없이 기존 질문을 사용합니다'
-            )
-          )
-          console.log('[Questions] Questions state updated successfully')
-          return
-        } else {
-          updateLoadingIfEnabled((prev) =>
-            completeLoadingStep(prev, 'questions_check', '기존 질문이 없어 새로 생성합니다')
-          )
-          console.log('[Questions] No existing questions found, will generate new ones')
+            if (checkResult.success && checkResult.questions && checkResult.questions.length > 0) {
+              return {
+                questions: sanitizeQuestions(checkResult.questions || []),
+                source: 'cache'
+              }
+            }
+          } else {
+            console.warn('[Questions] Check response not ok:', {
+              status: checkResponse.status,
+              statusText: checkResponse.statusText
+            })
+          }
+
+          console.log('[Questions] Generating new questions...')
+          const providerId = resolveSelectedProviderId(analysisToUse)
+          const generatePayload = {
+            repo_url: `https://github.com/${analysisToUse.repo_info.owner}/${analysisToUse.repo_info.name}`,
+            analysis_result: analysisToUse,
+            question_type: "technical",
+            difficulty: "medium",
+            provider_id: providerId
+          }
+          console.log('[Questions] Generation payload:', generatePayload)
+
+          const generateResponse = await apiFetch('/api/v1/questions/generate', {
+            method: 'POST',
+            headers: createApiHeaders({
+              includeApiKeys: true,
+              selectedAI: providerId
+            }),
+            body: JSON.stringify(generatePayload)
+          })
+
+          console.log('[Questions] 📥 Generate response received:', {
+            status: generateResponse.status,
+            statusText: generateResponse.statusText,
+            ok: generateResponse.ok
+          })
+
+          if (!generateResponse.ok) {
+            const errorText = await generateResponse.text()
+            console.error('[Questions] Generate response error:', errorText)
+
+            if (generateResponse.status === 409) {
+              updateLoadingIfEnabled((prev) =>
+                setLoadingStepDetail(
+                  activateLoadingStep(prev, 'questions_generate', '질문 생성이 이미 진행 중입니다'),
+                  'questions_generate',
+                  '다른 요청의 질문 생성 완료를 기다리는 중입니다'
+                )
+              )
+              return await waitForGeneratedQuestions(analysisToUse.analysis_id)
+            }
+
+            throw new Error(`질문 생성에 실패했습니다. (${generateResponse.status}: ${errorText})`)
+          }
+
+          const generateResult = await generateResponse.json()
+          console.log('[Questions] Parsed generate result:', {
+            success: generateResult.success,
+            questionsLength: generateResult.questions?.length || 0,
+            questionsExists: !!generateResult.questions,
+            analysisId: generateResult.analysis_id,
+            error: generateResult.error
+          })
+
+          if (!generateResult.success) {
+            throw new Error(`질문 생성 실패: ${generateResult.error}`)
+          }
+
+          return {
+            questions: sanitizeQuestions(generateResult.questions || []),
+            source: 'generated'
+          }
         }
-      } else {
-        console.warn('[Questions] Check response not ok:', {
-          status: checkResponse.status,
-          statusText: checkResponse.statusText
-        })
-        updateLoadingIfEnabled((prev) =>
-          failLoadingStep(prev, 'questions_check', `질문 조회 실패 (HTTP ${checkResponse.status})`)
-        )
-      }
-
-      // 질문이 없으면 새로 생성
-      updateLoadingIfEnabled((prev) =>
-        activateLoadingStep(prev, 'questions_generate', 'AI 질문을 생성하는 중입니다')
       )
-      console.log('[Questions] Generating new questions...')
-      const generatePayload = {
-        repo_url: `https://github.com/${analysisToUse.repo_info.owner}/${analysisToUse.repo_info.name}`,
-        analysis_result: analysisToUse,
-        question_type: "technical",
-        difficulty: "medium"
-      }
-      console.log('[Questions] Generation payload:', generatePayload)
 
-      const generateResponse = await apiFetch('/api/v1/questions/generate', {
-        method: 'POST',
-        headers: createApiHeaders(true), // API 키 포함하여 헤더 생성
-        body: JSON.stringify(generatePayload)
-      })
+      setQuestions(result.questions)
+      setQuestionsGenerated(result.questions.length > 0)
 
-      console.log('[Questions] 📥 Generate response received:', {
-        status: generateResponse.status,
-        statusText: generateResponse.statusText,
-        ok: generateResponse.ok
-      })
-
-      if (!generateResponse.ok) {
-        const errorText = await generateResponse.text()
-        console.error('[Questions] Generate response error:', errorText)
-
-        // 백엔드에서 이미 생성 중인 경우(409)에는 폴링으로 완료 대기
-        if (generateResponse.status === 409) {
-          updateLoadingIfEnabled((prev) =>
-            setLoadingStepDetail(
-              activateLoadingStep(prev, 'questions_generate', '질문 생성이 이미 진행 중입니다'),
-              'questions_generate',
-              '다른 요청의 질문 생성 완료를 기다리는 중입니다'
-            )
-          )
-          const recovered = await waitForGeneratedQuestions(analysisToUse.analysis_id)
-          if (recovered) return
-        }
-
-        updateLoadingIfEnabled((prev) =>
-          failLoadingStep(prev, 'questions_generate', `질문 생성 실패 (HTTP ${generateResponse.status})`)
-        )
-        throw new Error(`질문 생성에 실패했습니다. (${generateResponse.status}: ${errorText})`)
-      }
-
-      const generateResult = await generateResponse.json()
-      console.log('[Questions] Parsed generate result:', {
-        success: generateResult.success,
-        questionsLength: generateResult.questions?.length || 0,
-        questionsExists: !!generateResult.questions,
-        analysisId: generateResult.analysis_id,
-        error: generateResult.error
-      })
-
-      if (generateResult.success) {
-        console.log('[Questions] Generated questions successfully, setting state:', generateResult.questions?.length || 0)
-        setQuestions(generateResult.questions || [])
-        setQuestionsGenerated(true)
+      if (result.source === 'cache') {
         updateLoadingIfEnabled((prev) =>
           completeLoadingStep(
-            prev,
+            completeLoadingStep(
+              prev,
+              'questions_check',
+              `기존 질문 ${result.questions.length}개를 캐시에서 확인했습니다`
+            ),
             'questions_generate',
-            `질문 생성이 완료되었습니다 (${generateResult.questions?.length || 0}개)`
+            '추가 생성 없이 기존 질문을 사용합니다'
           )
         )
-        console.log('[Questions] Generated questions state updated successfully')
       } else {
-        console.error('[Questions] Generate result not successful:', generateResult.error)
         updateLoadingIfEnabled((prev) =>
-          failLoadingStep(prev, 'questions_generate', '질문 생성 결과가 유효하지 않습니다')
+          completeLoadingStep(prev, 'questions_check', '기존 질문이 없어 새로 생성합니다')
         )
-        throw new Error(`질문 생성 실패: ${generateResult.error}`)
+        updateLoadingIfEnabled((prev) =>
+          completeLoadingStep(
+            activateLoadingStep(prev, 'questions_generate', 'AI 질문을 생성하는 중입니다'),
+            'questions_generate',
+            result.source === 'generation_wait'
+              ? `질문 생성이 완료되어 ${result.questions.length}개 질문을 불러왔습니다`
+              : `질문 생성이 완료되었습니다 (${result.questions.length}개)`
+          )
+        )
       }
+
+      console.log('[Questions] Questions state updated successfully')
+      return result.questions
     } catch (error) {
       console.error('[Questions] Critical error in loadOrGenerateQuestions:', {
         error,
@@ -777,6 +808,7 @@ export function useDashboard(analysisId: string | undefined) {
         )
       )
       // 질문 생성에 실패해도 대시보드는 표시
+      return []
     } finally {
       console.log('[Questions] 🏁 loadOrGenerateQuestions finished, setting isLoadingQuestions to false')
       setIsLoadingQuestions(false)
@@ -788,16 +820,21 @@ export function useDashboard(analysisId: string | undefined) {
 
     setIsLoadingQuestions(true)
     try {
+      const providerId = resolveSelectedProviderId(analysisResult)
       // 강제 재생성 옵션을 사용하여 질문 생성
       const response = await apiFetch('/api/v1/questions/generate', {
         method: 'POST',
-        headers: createApiHeaders(true), // API 키 포함하여 헤더 생성
+        headers: createApiHeaders({
+          includeApiKeys: true,
+          selectedAI: providerId
+        }),
         body: JSON.stringify({
           repo_url: `https://github.com/${analysisResult.repo_info.owner}/${analysisResult.repo_info.name}`,
           analysis_result: analysisResult,
           question_type: "technical",
           difficulty: "medium",
-          force_regenerate: true
+          force_regenerate: true,
+          provider_id: providerId
         })
       })
 
@@ -841,16 +878,19 @@ export function useDashboard(analysisId: string | undefined) {
 
     setIsLoadingAllFiles(true)
     try {
-      const response = await apiFetch(`/api/v1/repository/analysis/${analysisId}/all-files?max_depth=3&max_files=500`, {
-        headers: getAnalysisAwareHeaders(analysisId, false)
+      const files = await dedupeAsync(`files:${analysisId}:3:500`, async () => {
+        const response = await apiFetch(`/api/v1/repository/analysis/${analysisId}/all-files?max_depth=3&max_files=500`, {
+          headers: getAnalysisAwareHeaders(analysisId, false)
+        })
+        storeIssuedAnalysisToken(analysisId, response)
+
+        if (!response.ok) {
+          throw new Error(`전체 파일 목록을 불러올 수 없습니다. (${response.status})`)
+        }
+
+        return await response.json() as FileTreeNode[]
       })
-      storeIssuedAnalysisToken(analysisId, response)
 
-      if (!response.ok) {
-        throw new Error('전체 파일 목록을 불러올 수 없습니다.')
-      }
-
-      const files = await response.json()
       setAllFiles(files)
       setFilteredFiles(files)
       setShowAllFiles(true)
@@ -973,10 +1013,11 @@ export function useDashboard(analysisId: string | undefined) {
     if (!analysisResult) return
 
     // 질문이 로드되지 않았으면 먼저 로드
+    let interviewQuestions = questions
     if (questions.length === 0) {
       console.log('질문이 없습니다. 질문을 먼저 생성합니다.')
-      await loadOrGenerateQuestions(analysisResult)
-      if (questions.length === 0) {
+      interviewQuestions = await loadOrGenerateQuestions(analysisResult)
+      if (interviewQuestions.length === 0) {
         throw new Error('질문 생성에 실패했습니다.')
       }
     }
@@ -984,27 +1025,32 @@ export function useDashboard(analysisId: string | undefined) {
     console.log('면접 시작 요청:', {
       repo_url: `https://github.com/${analysisResult.repo_info.owner}/${analysisResult.repo_info.name}`,
       analysis_id: analysisResult.analysis_id,
-      question_ids: questions.map(q => q.id),
-      questions_count: questions.length
+      question_ids: interviewQuestions.map(q => q.id),
+      questions_count: interviewQuestions.length
     })
 
     try {
       // API 키 헤더 포함하여 면접 시작 요청
       const analysisToken = getAnalysisToken(analysisResult.analysis_id)
+      const providerId = resolveSelectedProviderId(analysisResult)
       const apiHeaders = analysisToken
         ? createApiHeaders({
             includeApiKeys: true,
+            selectedAI: providerId,
             analysisToken
           })
         : createApiHeaders({
-            includeApiKeys: true
+            includeApiKeys: true,
+            selectedAI: providerId
           })
-      const { githubToken, googleApiKey, upstageApiKey, selectedProvider } = getApiKeysFromStorage()
+      const { githubToken, googleApiKey, upstageApiKey, selectedAIId, selectedProvider } =
+        getApiKeysFromStorage()
       console.log('[DASHBOARD] 면접 시작 요청 헤더:', JSON.stringify(apiHeaders, null, 2))
       console.log('[DASHBOARD] localStorage 키 확인:', {
         githubToken: githubToken ? '설정됨' : '없음',
         googleApiKey: googleApiKey ? '설정됨' : '없음',
         upstageApiKey: upstageApiKey ? '설정됨' : '없음',
+        selectedAIId,
         selectedProvider
       })
 
@@ -1014,7 +1060,7 @@ export function useDashboard(analysisId: string | undefined) {
         body: JSON.stringify({
           repo_url: `https://github.com/${analysisResult.repo_info.owner}/${analysisResult.repo_info.name}`,
           analysis_id: analysisResult.analysis_id,
-          question_ids: questions.map(q => q.id)
+          question_ids: interviewQuestions.map(q => q.id)
         })
       })
 
@@ -1164,7 +1210,7 @@ export function useDashboard(analysisId: string | undefined) {
   return {
     // state
     analysisResult, questions, isLoadingQuestions, isLoadingAnalysis,
-    questionsGenerated, graphData, isLoadingGraph,
+    questionsGenerated, graphData, isLoadingGraph, graphStatus,
     allAnalyses, isLoadingAllAnalyses,
     loadingProgress,
     allFiles, isLoadingAllFiles, showAllFiles,

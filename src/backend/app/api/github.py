@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 import uuid
 import time
+from collections import deque
 from typing import Dict, List, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel, HttpUrl
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 
 # 임시 메모리 저장소
 analysis_cache = {}
+all_files_cache = {}
 
 
 router = APIRouter()
@@ -31,6 +33,7 @@ class RepositoryAnalysisRequest(BaseModel):
     """저장소 분석 요청"""
     repo_url: HttpUrl
     store_results: bool = True
+    selected_provider_id: Optional[str] = None
 
 
 class RepositoryInfo(BaseModel):
@@ -70,6 +73,7 @@ class AnalysisResult(BaseModel):
     """분석 결과"""
     success: bool
     analysis_id: str
+    selected_provider_id: Optional[str] = None
     repo_info: RepositoryInfo
     tech_stack: Dict[str, float]
     key_files: List[FileInfo]
@@ -185,6 +189,38 @@ class GitHubClient:
         final_items = all_items + additional_items
         print(f"[TREE_API] Complete tree assembled: {len(final_items)} items")
         return final_items
+
+    async def get_repository_tree_limited_depth(
+        self,
+        owner: str,
+        repo: str,
+        max_depth: int
+    ) -> List[Dict[str, Any]]:
+        """필요한 깊이까지만 Tree API를 순회해서 가져오기"""
+        print(f"[TREE_API] Fetching limited-depth tree for {owner}/{repo} (max_depth={max_depth})")
+
+        queue = deque([("", "HEAD")])
+        visited_shas = set()
+        items: List[Dict[str, Any]] = []
+
+        while queue:
+            parent_path, tree_sha = queue.popleft()
+            if tree_sha in visited_shas:
+                continue
+            visited_shas.add(tree_sha)
+
+            tree_data = await self.get_repository_tree(owner, repo, tree_sha, recursive=False)
+
+            for node in tree_data.get("tree", []):
+                full_path = node["path"] if not parent_path else f"{parent_path}/{node['path']}"
+                item = {**node, "path": full_path}
+                items.append(item)
+
+                if node["type"] == "tree" and full_path.count("/") < max_depth:
+                    queue.append((full_path, node["sha"]))
+
+        print(f"[TREE_API] Limited-depth tree fetched: {len(items)} items")
+        return items
 
 
 class RepositoryAnalyzer:
@@ -490,8 +526,8 @@ class RepositoryAnalyzer:
             print(f"[GET_ALL_FILES] Starting Tree API fetch for {owner}/{repo}")
             start_time = time.time()
             
-            # Tree API로 전체 구조 한 번에 가져오기
-            tree_items = await self.github_client.get_complete_repository_tree(owner, repo)
+            # 필요한 깊이까지만 Tree API로 가져오기
+            tree_items = await self.github_client.get_repository_tree_limited_depth(owner, repo, max_depth)
             
             api_time = time.time() - start_time
             print(f"[GET_ALL_FILES] Tree API completed in {api_time:.2f}s, got {len(tree_items)} items")
@@ -1045,6 +1081,7 @@ async def get_analysis_result(analysis_id: str, db: Session = Depends(get_db)):
         analysis_result = AnalysisResult(
             success=True,
             analysis_id=str(analysis_db.id),
+            selected_provider_id=(analysis_db.analysis_metadata or {}).get("selected_provider_id"),
             repo_info=repo_info,
             tech_stack=tech_stack,
             key_files=key_files,
@@ -1082,14 +1119,19 @@ async def get_all_repository_files(analysis_id: str, max_depth: int = 3, max_fil
     
     analysis_result = analysis_cache[analysis_id]
     analyzer = RepositoryAnalyzer()
-    
+
     try:
+        cache_key = (analysis_id, max_depth, max_files)
+        if cache_key in all_files_cache:
+            return all_files_cache[cache_key]
+
         # 저장소 정보에서 owner와 repo 추출
         owner = analysis_result.repo_info.owner
         repo = analysis_result.repo_info.name
         
         # 모든 파일을 트리 구조로 가져오기
         file_tree = await analyzer.get_all_files(owner, repo, max_depth, max_files)
+        all_files_cache[cache_key] = file_tree
         
         return file_tree
         
@@ -1320,6 +1362,7 @@ async def analyze_repository_simple(request: RepositoryAnalysisRequest):
         analysis_result = AnalysisResult(
             success=True,
             analysis_id=analysis_id,
+            selected_provider_id=request.selected_provider_id,
             repo_info=repo_info,
             tech_stack=tech_stack,
             key_files=key_files,
@@ -1387,6 +1430,7 @@ async def debug_cache():
     """메모리 캐시 상태 확인 (디버깅용)"""
     return {
         "cache_size": len(analysis_cache),
+        "all_files_cache_size": len(all_files_cache),
         "cached_analysis_ids": list(analysis_cache.keys()),
         "analysis_details": [
             {
@@ -1403,10 +1447,13 @@ async def debug_cache():
 async def clear_cache():
     """메모리 캐시 초기화 (디버깅용)"""
     cache_size_before = len(analysis_cache)
+    all_files_cache_size_before = len(all_files_cache)
     analysis_cache.clear()
+    all_files_cache.clear()
     
     return {
         "message": "캐시가 성공적으로 초기화되었습니다",
         "cleared_items": cache_size_before,
+        "cleared_all_files_items": all_files_cache_size_before,
         "current_cache_size": len(analysis_cache)
     }

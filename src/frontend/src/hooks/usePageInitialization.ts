@@ -1,35 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, useEffect, useMemo } from 'react'
-
-// 로컬스토리지 유틸리티
-const getApiKeysFromStorage = () => {
-  try {
-    return {
-      githubToken: localStorage.getItem('techgiterview_github_token') || '',
-      upstageApiKey: localStorage.getItem('techgiterview_upstage_api_key') || '',
-      googleApiKey: localStorage.getItem('techgiterview_google_api_key') || '',
-    }
-  } catch (error) {
-    return { githubToken: '', upstageApiKey: '', googleApiKey: '' }
-  }
-}
-
-// API 요청 헤더 생성
-const createApiHeaders = (includeApiKeys: boolean = false) => {
-  const headers: Record<string, string> = {
-    'Accept': 'application/json',
-    'Content-Type': 'application/json',
-  }
-  
-  if (includeApiKeys) {
-    const { githubToken, upstageApiKey, googleApiKey } = getApiKeysFromStorage()
-    if (githubToken) headers['X-GitHub-Token'] = githubToken
-    if (upstageApiKey) headers['X-Upstage-API-Key'] = upstageApiKey
-    if (googleApiKey) headers['X-Google-API-Key'] = googleApiKey
-  }
-  
-  return headers
-}
+import {
+  createApiHeaders,
+  getApiKeysFromStorage,
+  getProviderFromSelectedAI,
+} from '../utils/apiHeaders'
 
 // API 인터페이스
 interface AIProvider {
@@ -52,7 +27,7 @@ interface PageInitData {
 // 통합 API 호출 함수 (새로운 단일 엔드포인트 사용)
 const fetchPageInitData = async (): Promise<PageInitData> => {
   try {
-    const headers = createApiHeaders(true)
+    const headers = createApiHeaders({ includeApiKeys: true })
     
     // 새로운 통합 API 호출
     const response = await fetch('/api/v1/homepage/init', { 
@@ -167,14 +142,16 @@ export const usePageInitialization = () => {
   
   // 추천 AI 자동 선택
   useEffect(() => {
-    if (sortedProviders.length > 0 && !selectedAI) {
-      const recommended = sortedProviders.find(p => p.recommended)
-      if (recommended) {
-        setSelectedAI(recommended.id)
-      } else {
-        setSelectedAI(sortedProviders[0].id)
-      }
-    }
+    if (!sortedProviders.length || selectedAI) return
+
+    const stored = getApiKeysFromStorage()
+    const exactMatch = sortedProviders.find((provider) => provider.id === stored.selectedAIId)
+    const providerMatch = sortedProviders.find(
+      (provider) => getProviderFromSelectedAI(provider.id) === stored.selectedProvider
+    )
+    const recommended = sortedProviders.find((provider) => provider.recommended)
+
+    setSelectedAI((exactMatch ?? providerMatch ?? recommended ?? sortedProviders[0]).id)
   }, [sortedProviders, selectedAI])
   
   return {

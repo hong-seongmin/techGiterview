@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.agents.question_generator import QuestionGenerator
+from app.core.ai_service import AIProvider
 from app.core.database import engine
 
 router = APIRouter()
@@ -48,6 +49,22 @@ class QuestionGenerationRequest(BaseModel):
     difficulty: str = "medium"
     question_count: int = 9
     force_regenerate: bool = False  # 강제 재생성 옵션
+    provider_id: Optional[str] = None
+
+
+def resolve_provider_id(provider_id: Optional[str]) -> Optional[AIProvider]:
+    if not provider_id:
+        return None
+
+    normalized = provider_id.strip().lower()
+
+    if "upstage" in normalized or "solar" in normalized:
+        return AIProvider.UPSTAGE_SOLAR
+
+    if "gemini" in normalized or "google" in normalized:
+        return AIProvider.GEMINI_FLASH
+
+    raise HTTPException(status_code=400, detail=f"지원되지 않는 provider_id: {provider_id}")
 
 
 class QuestionResponse(BaseModel):
@@ -279,7 +296,9 @@ async def generate_questions(
         api_keys = extract_api_keys_from_headers(github_token, google_api_key, upstage_api_key)
         
         # 질문 생성기 초기화
-        generator = QuestionGenerator()
+        generator = QuestionGenerator(
+            preferred_provider=resolve_provider_id(request.provider_id)
+        )
         
         # 질문 생성 실행 - QuestionGenerator 내부 기본값 사용 (3가지 타입 균등 분배)
         result = await generator.generate_questions(

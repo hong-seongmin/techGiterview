@@ -10,6 +10,10 @@ import {
   SampleRepositoriesSection,
 } from '../components/HomePage';
 import { handleRepositoryAnalysis } from '../utils/repositoryAnalysisService';
+import {
+  createApiHeaders as createSharedApiHeaders,
+  persistSelectedAI,
+} from '../utils/apiHeaders'
 import type { HomePageState } from '../types/homePage';
 import { QuickAccessV2 } from '../components/v2/QuickAccessV2';
 import './HomePage.css';
@@ -26,7 +30,6 @@ export const HomePage: React.FC = () => {
     error,
     isUsingLocalData,
     hasStoredKeys,
-    createApiHeaders,
   } = usePageInitialization();
 
   const [state, setState] = useState<HomePageState>({
@@ -43,8 +46,13 @@ export const HomePage: React.FC = () => {
     setState((prev) => ({ ...prev, ...updates }));
   };
 
-  const createApiHeadersForAnalysis = (includeApiKeys: boolean, _selectedAI?: string) =>
-    createApiHeaders(includeApiKeys);
+  const handleSelectedAIChange = (aiId: string) => {
+    persistSelectedAI(aiId)
+    setSelectedAI(aiId)
+  }
+
+  const createApiHeadersForAnalysis = (includeApiKeys: boolean, selectedAI?: string) =>
+    createSharedApiHeaders({ includeApiKeys, selectedAI });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -88,7 +96,7 @@ export const HomePage: React.FC = () => {
         isConnected={!error && !isLoading}
         providers={providers}
         selectedAI={selectedAI}
-        onSelectedAIChange={setSelectedAI}
+        onSelectedAIChange={handleSelectedAIChange}
       />
 
       <main className="home-v2-main">
