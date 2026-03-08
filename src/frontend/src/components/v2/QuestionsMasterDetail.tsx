@@ -227,11 +227,28 @@ export function QuestionsMasterDetail({
 }: QuestionsMasterDetailProps) {
   const [expandedCode, setExpandedCode] = React.useState(false)
 
-  const selectedQuestion = selectedId ? questions.find(q => q.id === selectedId) ?? null : null
-  const selectedIndex = selectedId ? questions.findIndex(q => q.id === selectedId) : -1
+  const selectedQuestionById = selectedId ? questions.find(q => q.id === selectedId) ?? null : null
+  const selectedQuestion = selectedQuestionById ?? (questions.length > 0 ? questions[0] : null)
+  const effectiveSelectedId = selectedQuestion?.id ?? null
+  const selectedIndex = selectedQuestion ? questions.findIndex(q => q.id === selectedQuestion.id) : -1
 
   // Reset code expand when question changes
-  React.useEffect(() => { setExpandedCode(false) }, [selectedId])
+  React.useEffect(() => { setExpandedCode(false) }, [effectiveSelectedId])
+
+  // Always keep a selected question when list is available.
+  React.useEffect(() => {
+    if (questions.length === 0) {
+      if (selectedId !== null) {
+        onSelect(null)
+      }
+      return
+    }
+
+    const hasSelected = selectedId ? questions.some((question) => question.id === selectedId) : false
+    if (!hasSelected) {
+      onSelect(questions[0].id)
+    }
+  }, [questions, selectedId, onSelect])
 
   return (
     <div className="v2-qmd">
@@ -293,11 +310,21 @@ export function QuestionsMasterDetail({
                   key={q.id}
                   question={q}
                   index={i}
-                  isSelected={selectedId === q.id}
-                  onClick={() => onSelect(selectedId === q.id ? null : q.id)}
+                  isSelected={effectiveSelectedId === q.id}
+                  onClick={() => onSelect(q.id)}
                 />
               ))
             )}
+          </div>
+          <div className="v2-qmd-list-cta">
+            <button
+              className="v2-btn v2-btn-primary v2-btn-sm v2-qmd-start-btn"
+              onClick={onStartInterview}
+              disabled={isLoadingQuestions || questions.length === 0}
+            >
+              <Play className="v2-btn-icon" />
+              {isLoadingQuestions ? '질문 준비 중...' : '면접 시작하기'}
+            </button>
           </div>
         </div>
 

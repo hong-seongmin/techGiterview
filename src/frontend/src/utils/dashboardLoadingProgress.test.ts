@@ -23,7 +23,6 @@ describe('dashboardLoadingProgress', () => {
   it('reaches 100 when all analysis steps are complete', () => {
     const stepKeys = [
       'analysis_fetch',
-      'graph_fetch',
       'files_fetch',
       'questions_check',
       'questions_generate',
@@ -49,4 +48,3 @@ describe('dashboardLoadingProgress', () => {
     expect(failed.steps.find((step) => step.key === 'questions_generate')?.status).toBe('failed')
   })
 })
-

@@ -16,10 +16,73 @@ const CONTACT_ICON_MAP = {
   docs: Book,
 } as const;
 
-const isExternalLink = (href: string): boolean => href.startsWith('http://') || href.startsWith('https://');
+const isExternalLink = (href: string): boolean =>
+  href.startsWith('http://') || href.startsWith('https://');
 
-export const SiteFooter: React.FC = () => {
+interface SiteFooterProps {
+  variant?: 'full' | 'compact';
+}
+
+interface SiteFooterContentProps {
+  currentYear: number;
+  repositoryLink: string;
+  variant: 'full' | 'compact';
+}
+
+export const SiteFooter: React.FC<SiteFooterProps> = ({ variant = 'full' }) => {
   const currentYear = new Date().getFullYear();
+  const repositoryLink =
+    FOOTER_CONTACT_ITEMS.find((item) => item.key === 'repository')?.href ??
+    'https://github.com/hong-seongmin/techGiterview';
+
+  return (
+    <SiteFooterContent
+      currentYear={currentYear}
+      repositoryLink={repositoryLink}
+      variant={variant}
+    />
+  );
+};
+
+const SiteFooterContent: React.FC<SiteFooterContentProps> = ({
+  currentYear,
+  repositoryLink,
+  variant,
+}) => {
+  if (variant === 'compact') {
+    return (
+      <footer className="site-footer site-footer--compact">
+        <div className="site-footer__container site-footer__container--compact">
+          <div className="site-footer__compact-row">
+            <p className="site-footer__copyright">
+              &copy; {currentYear} TechGiterview
+            </p>
+            <nav className="site-footer__legal-links" aria-label="빠른 링크">
+              {FOOTER_LEGAL_ITEMS.map((item) => (
+                <a
+                  key={item.label}
+                  className="site-footer__link site-footer__legal-link"
+                  href={item.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {item.label}
+                </a>
+              ))}
+              <a
+                className="site-footer__link site-footer__legal-link"
+                href={repositoryLink}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                GitHub
+              </a>
+            </nav>
+          </div>
+        </div>
+      </footer>
+    );
+  }
 
   return (
     <footer className="site-footer">

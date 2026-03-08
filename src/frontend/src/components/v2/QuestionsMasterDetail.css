@@ -38,6 +38,20 @@
 .v2-select { height: 32px; font-size: var(--v2-text-sm); }
 .v2-qmd-list-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 
+.v2-qmd-list-cta {
+  position: sticky;
+  bottom: 0;
+  border-top: 1px solid var(--v2-border);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.2), rgba(15, 23, 42, 0.9));
+  padding: 10px 12px;
+}
+
+.v2-qmd-start-btn {
+  width: 100%;
+  justify-content: center;
+  border-radius: 10px;
+}
+
 /* Question list card */
 .v2-qlc {
   padding: 0;

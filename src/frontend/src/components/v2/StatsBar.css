@@ -1,6 +1,6 @@
 .v2-stats-bar {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: minmax(220px, 1fr) minmax(240px, 1.35fr) minmax(180px, 0.95fr) minmax(180px, 0.95fr);
   gap: 10px;
   flex-shrink: 0;
 }
@@ -12,6 +12,18 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.v2-stat-card--questions {
+  border-color: rgba(59, 130, 246, 0.42);
+  background:
+    linear-gradient(180deg, rgba(59, 130, 246, 0.14), rgba(59, 130, 246, 0.05)),
+    var(--v2-bg-surface);
+  box-shadow: 0 10px 20px rgba(16, 24, 40, 0.28);
+}
+
+.v2-stat-card--questions .v2-stat-value {
+  font-size: 30px;
 }
 .v2-stat-card-title { margin-bottom: 4px; }
 .v2-stat-value {
@@ -32,7 +44,7 @@
 .v2-tech-mini-pct { font-size: var(--v2-text-xs); color: var(--v2-text-muted); width: 30px; text-align: right; flex-shrink: 0; }
 
 @media (max-width: 768px) {
-  .v2-stats-bar { grid-template-columns: repeat(2, 1fr); }
+  .v2-stats-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 480px) {
   .v2-stats-bar { grid-template-columns: 1fr 1fr; }

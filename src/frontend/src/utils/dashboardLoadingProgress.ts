@@ -13,11 +13,10 @@ interface LoadingStepTemplate {
 const ACTIVE_WEIGHT_FACTOR = 0.35
 
 const ANALYSIS_STEP_TEMPLATES: LoadingStepTemplate[] = [
-  { key: 'analysis_fetch', label: '저장소 정보 조회', weight: 20 },
-  { key: 'graph_fetch', label: '파일 구조 분석', weight: 15 },
-  { key: 'files_fetch', label: '핵심 파일 로딩', weight: 15 },
-  { key: 'questions_check', label: '기존 질문 확인', weight: 15 },
-  { key: 'questions_generate', label: 'AI 질문 생성', weight: 30 },
+  { key: 'analysis_fetch', label: '저장소 정보 조회', weight: 35 },
+  { key: 'files_fetch', label: '핵심 파일 요약', weight: 15 },
+  { key: 'questions_check', label: '기존 질문 확인', weight: 20 },
+  { key: 'questions_generate', label: 'AI 질문 생성', weight: 25 },
   { key: 'finalize', label: '결과 정리', weight: 5 },
 ]
 
@@ -178,4 +177,3 @@ export const setLoadingAttempt = (
     total,
   },
 })
-

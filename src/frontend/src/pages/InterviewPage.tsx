@@ -32,7 +32,7 @@ import {
 import { AppShellV2 } from '../components/v2/AppShellV2'
 import { AnswerFeedback } from '../components/AnswerFeedback'
 import { debugLog } from '../utils/debugUtils'
-import { buildQuestionPreviewText } from '../utils/questionFormatter'
+import { buildQuestionPreviewText, formatQuestionForDisplay } from '../utils/questionFormatter'
 import { useResizableSidebar } from '../hooks/useResizableSidebar'
 import './InterviewPage.css'
 
@@ -1185,6 +1185,18 @@ export const InterviewPage: React.FC = () => {
   }
 
   const currentQuestion = questions[currentQuestionIndex]
+  const currentQuestionDisplay = currentQuestion
+    ? formatQuestionForDisplay({
+        question: currentQuestion.question,
+        question_headline: currentQuestion.question_headline,
+        question_details_markdown: currentQuestion.question_details_markdown,
+        question_has_details: currentQuestion.question_has_details
+      })
+    : null
+  const progressPercentage = questions.length > 0
+    ? Math.round(((currentQuestionIndex + 1) / questions.length) * 100)
+    : 0
+  const estimatedRemainingMinutes = Math.max(1, Math.ceil(timeRemaining / 60))
   const timerUrgencyClass =
     timeRemaining <= 5 * 60
       ? 'timer-v2--critical'
@@ -1350,6 +1362,33 @@ export const InterviewPage: React.FC = () => {
           </div>
         )}
       </div>
+      <div className="v2-sidebar-section">
+        <div className="v2-sidebar-section-header">
+          <Clock className="v2-icon-xs" />
+          <span className="v2-label">진행 요약</span>
+        </div>
+        <div className="v2-sidebar-section-body interview-sidebar-summary">
+          <div className="interview-progress-track" aria-hidden="true">
+            <span className="interview-progress-fill" style={{ width: `${progressPercentage}%` }} />
+          </div>
+          <div className="interview-sidebar-summary-row">
+            <span>진행률</span>
+            <strong>{progressPercentage}%</strong>
+          </div>
+          <div className="interview-sidebar-summary-row">
+            <span>예상 남은 시간</span>
+            <strong>약 {estimatedRemainingMinutes}분</strong>
+          </div>
+          <button
+            type="button"
+            className="finish-interview-btn"
+            onClick={requestFinishInterview}
+            disabled={interview.status === 'completed' || isFinishingInterview}
+          >
+            {isFinishingInterview ? '종료 중...' : '면접 종료'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 
@@ -1410,13 +1449,24 @@ export const InterviewPage: React.FC = () => {
                       remarkPlugins={[remarkGfm]}
                       components={{
                         p: ({ children }) => <p className="markdown-paragraph">{children}</p>,
+                        strong: ({ children }) => <strong className="markdown-strong">{children}</strong>,
                         code: ({ children }) => <code className="markdown-code">{children}</code>,
                         pre: ({ children }) => <pre className="markdown-pre">{children}</pre>
                       }}
                     >
-                      {currentQuestion.question}
+                      {currentQuestionDisplay?.headline || currentQuestion.question}
                     </ReactMarkdown>
                   </div>
+                  {currentQuestionDisplay?.hasDetails && currentQuestionDisplay.detailsMarkdown && (
+                    <div className="interview-question-details">
+                      <span className="interview-question-details-label">비교/확장 포인트</span>
+                      <div className="interview-question-details-body">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {currentQuestionDisplay.detailsMarkdown}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
                   {currentQuestion.context && (
                     <div className="interview-question-context">
                       <Lightbulb className="v2-icon-sm interview-question-context-icon interview-question-context-icon--inline" />

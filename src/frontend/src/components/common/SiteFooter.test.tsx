@@ -20,4 +20,13 @@ describe('SiteFooter', () => {
     expect(repoLink).toHaveAttribute('target', '_blank')
     expect(repoLink).toHaveAttribute('rel', 'noopener noreferrer')
   })
+
+  it('renders compact variant with slim quick links', () => {
+    render(<SiteFooter variant="compact" />)
+
+    expect(screen.getByRole('link', { name: 'README' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'LICENSE' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'GitHub' })).toBeInTheDocument()
+    expect(screen.queryByText('지원 기술')).not.toBeInTheDocument()
+  })
 })

@@ -18,7 +18,7 @@ export function StatsBar({ techStack, questionCount, keyFileCount, recommendatio
   return (
     <div className="v2-stats-bar">
       {/* Tech Stack */}
-      <div className="v2-stat-card">
+      <div className="v2-stat-card v2-stat-card--tech">
         <div className="v2-label v2-stat-card-title">Tech Stack</div>
         {topTech.length > 0 ? (
           <div className="v2-tech-mini">
@@ -41,14 +41,14 @@ export function StatsBar({ techStack, questionCount, keyFileCount, recommendatio
       </div>
 
       {/* Questions */}
-      <div className="v2-stat-card">
+      <div className="v2-stat-card v2-stat-card--questions">
         <div className="v2-label v2-stat-card-title">Questions</div>
         <div className="v2-stat-value v2-stat-value--accent">{questionCount}</div>
         <div className="v2-stat-sub">생성된 면접 질문</div>
       </div>
 
       {/* Key Files */}
-      <div className="v2-stat-card">
+      <div className="v2-stat-card v2-stat-card--key-files">
         <div className="v2-label v2-stat-card-title">Key Files</div>
         <div className="v2-stat-value">{keyFileCount}</div>
         <div className="v2-stat-sub">
@@ -58,13 +58,10 @@ export function StatsBar({ techStack, questionCount, keyFileCount, recommendatio
       </div>
 
       {/* Insights */}
-      <div className="v2-stat-card">
+      <div className="v2-stat-card v2-stat-card--insights">
         <div className="v2-label v2-stat-card-title">Insights</div>
         <div className="v2-stat-value v2-stat-value--success">{recommendationCount}</div>
         <div className="v2-stat-sub">개선 제안 항목</div>
-        <div className="v2-mini-bar-track" style={{ marginTop: 8 }}>
-          <div className="v2-mini-bar-fill" style={{ width: `${Math.min(100, recommendationCount * 20)}%`, background: 'var(--v2-success)' }} />
-        </div>
       </div>
     </div>
   )

@@ -18,6 +18,11 @@ import './DashboardPageV2.css'
 export function DashboardPageV2() {
   const { analysisId } = useParams<{ analysisId?: string }>()
   const navigate = useNavigate()
+  const [isFileExplorerOpen, setIsFileExplorerOpen] = React.useState(false)
+
+  React.useEffect(() => {
+    setIsFileExplorerOpen(false)
+  }, [analysisId])
 
   const {
     // 분석 결과
@@ -40,6 +45,8 @@ export function DashboardPageV2() {
     activeMainTab,
     // 그래프
     graphData,
+    graphStatus,
+    isLoadingGraph,
     // 파일
     allFiles,
     isLoadingAllFiles,
@@ -54,6 +61,8 @@ export function DashboardPageV2() {
     startInterview,
     regenerateQuestions,
     loadOrGenerateQuestions,
+    fetchGraphData,
+    loadAllFiles,
     handleSearch,
     toggleFolder,
     handleFileClick,
@@ -77,6 +86,22 @@ export function DashboardPageV2() {
     }
     navigate(`/dashboard/${targetAnalysisId}`)
   }
+
+  React.useEffect(() => {
+    if (!analysisResult || activeMainTab !== 'graph' || graphStatus !== 'idle') {
+      return
+    }
+
+    void fetchGraphData(analysisResult.analysis_id)
+  }, [analysisResult, activeMainTab, graphStatus, fetchGraphData])
+
+  React.useEffect(() => {
+    if (!analysisResult || !isFileExplorerOpen || allFiles.length > 0 || isLoadingAllFiles) {
+      return
+    }
+
+    void loadAllFiles()
+  }, [analysisResult, isFileExplorerOpen, allFiles.length, isLoadingAllFiles, loadAllFiles])
 
   // ── 로딩 상태 ────────────────────────────────────────────────────────────
   if (isLoadingAnalysis || isLoadingAllAnalyses) {
@@ -148,6 +173,10 @@ export function DashboardPageV2() {
   }
 
   const { repo_info, tech_stack, key_files, recommendations } = analysisResult
+  const highlightedKeyFiles = (key_files || []).slice(0, 16)
+  const hasGraphData = Boolean(
+    graphData && Array.isArray(graphData.nodes) && graphData.nodes.length > 0
+  )
 
   // ── Header ───────────────────────────────────────────────────────────────
   const header = (
@@ -225,15 +254,39 @@ export function DashboardPageV2() {
             </span>
           )}
         </div>
-        <FileTreeV2
-          nodes={allFiles}
-          expandedFolders={expandedFolders}
-          onToggleFolder={toggleFolder}
-          onFileClick={handleFileClick}
-          searchTerm={searchTerm}
-          onSearch={handleSearch}
-          isLoading={isLoadingAllFiles}
-        />
+        <div className="v2-sidebar-section-body v2-sidebar-files-body">
+          {highlightedKeyFiles.length > 0 ? (
+            <ul className="v2-sidebar-key-files">
+              {highlightedKeyFiles.map((file) => (
+                <li key={file.path} className="v2-sidebar-key-file-item v2-truncate">
+                  {file.path}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="v2-sidebar-files-empty">아직 주요 파일 정보가 없습니다.</p>
+          )}
+
+          <button
+            className="v2-btn v2-btn-outline v2-btn-sm v2-sidebar-toggle-files"
+            onClick={() => setIsFileExplorerOpen((prev) => !prev)}
+            type="button"
+          >
+            {isFileExplorerOpen ? '전체 파일 숨기기' : '전체 파일 보기'}
+          </button>
+        </div>
+
+        {isFileExplorerOpen && (
+          <FileTreeV2
+            nodes={allFiles}
+            expandedFolders={expandedFolders}
+            onToggleFolder={toggleFolder}
+            onFileClick={handleFileClick}
+            searchTerm={searchTerm}
+            onSearch={handleSearch}
+            isLoading={isLoadingAllFiles}
+          />
+        )}
       </div>
     </div>
   )
@@ -297,9 +350,33 @@ export function DashboardPageV2() {
 
       {activeMainTab === 'graph' && (
         <div className="v2-tab-panel v2-tab-panel--graph">
-          <CodeGraphViewer
-            graphData={graphData}
-          />
+          {hasGraphData ? (
+            <CodeGraphViewer graphData={graphData} />
+          ) : isLoadingGraph || graphStatus === 'loading' ? (
+            <div className="v2-graph-empty">
+              <span className="v2-badge v2-badge-default">로딩 중</span>
+              <h3>코드 그래프를 불러오는 중입니다.</h3>
+              <p>분석 가능한 의존성 그래프가 있으면 바로 표시합니다.</p>
+            </div>
+          ) : graphStatus === 'unsupported' ? (
+            <div className="v2-graph-empty">
+              <span className="v2-badge v2-badge-default">미지원</span>
+              <h3>현재 서버에는 코드 그래프 API가 없습니다.</h3>
+              <p>그래프 탭은 유지되지만, 서버가 그래프 데이터를 제공할 때만 시각화됩니다.</p>
+            </div>
+          ) : graphStatus === 'error' ? (
+            <div className="v2-graph-empty">
+              <span className="v2-badge v2-badge-default">오류</span>
+              <h3>코드 그래프 로딩에 실패했습니다.</h3>
+              <p>다시 탭을 열거나 새로고침해 재시도할 수 있습니다.</p>
+            </div>
+          ) : (
+            <div className="v2-graph-empty">
+              <span className="v2-badge v2-badge-default">준비 중</span>
+              <h3>그래프 탭을 열면 코드 그래프를 요청합니다.</h3>
+              <p>초기 로딩 속도를 줄이기 위해 그래프는 필요할 때만 가져옵니다.</p>
+            </div>
+          )}
         </div>
       )}
     </div>
