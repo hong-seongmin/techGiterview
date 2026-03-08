@@ -6,6 +6,7 @@
 
 import requests
 import json
+import os
 
 def test_header_transmission():
     """API 키 헤더 전달 및 로깅 테스트"""
@@ -13,15 +14,17 @@ def test_header_transmission():
     base_url = "http://127.0.0.1:8004"
     analysis_id = "85b50ffd-c902-4f7a-803b-790b6fd8e115"
     
-    # 테스트용 API 키
-    github_token = "ghp_test12345abcdefghijklmnopqrstuvwxyz"
-    google_api_key = "AIzaSyTest123456789abcdefghijklmnopqrstuvwxyz"
+    # 환경변수 기반 테스트용 API 키
+    github_token = os.getenv("TEST_GITHUB_TOKEN", "")
+    google_api_key = os.getenv("TEST_GOOGLE_API_KEY", "")
+    analysis_token = os.getenv("TEST_ANALYSIS_TOKEN", "")
     
     print("========== API 키 헤더 전달 테스트 ==========")
     print(f"Backend URL: {base_url}")
     print(f"Analysis ID: {analysis_id}")
-    print(f"GitHub Token: {github_token[:15]}...")
-    print(f"Google API Key: {google_api_key[:15]}...")
+    print(f"GitHub Token: {'설정됨' if github_token else '미설정'}")
+    print(f"Google API Key: {'설정됨' if google_api_key else '미설정'}")
+    print(f"Analysis Token: {'설정됨' if analysis_token else '미설정'}")
     
     # 1. 먼저 질문을 캐시에 직접 생성 (빠른 테스트를 위해)
     print("\n1. 테스트용 질문 캐시 생성...")
@@ -56,12 +59,14 @@ def test_header_transmission():
     interview_headers = {
         "Content-Type": "application/json",
         "x-github-token": github_token,
-        "x-google-api-key": google_api_key
+        "x-google-api-key": google_api_key,
+        "x-analysis-token": analysis_token,
     }
     
-    print(f"요청 헤더:")
-    print(f"  x-github-token: {github_token[:20]}...")
-    print(f"  x-google-api-key: {google_api_key[:20]}...")
+    print("요청 헤더:")
+    print(f"  x-github-token: {'설정됨' if github_token else '미설정'}")
+    print(f"  x-google-api-key: {'설정됨' if google_api_key else '미설정'}")
+    print(f"  x-analysis-token: {'설정됨' if analysis_token else '미설정'}")
     
     try:
         print("\n실제 요청 전송 중...")
@@ -82,18 +87,8 @@ def test_header_transmission():
             print("❌ 요청 실패")
             print(f"응답: {response.text}")
         
-        # 백엔드 로그에서 다음과 같은 메시지가 나타나야 함:
-        # [INTERVIEW_START] 받은 헤더:
-        # [INTERVIEW_START]   - GitHub Token: 있음
-        # [INTERVIEW_START]   - Google API Key: 있음
-        # [INTERVIEW_START]   - GitHub Token 값: ghp_test12345...
-        # [INTERVIEW_START]   - Google API Key 값: AIzaSyTest123...
-        
         print("\n📋 백엔드 로그를 확인하세요:")
-        print("  - [INTERVIEW_START] 받은 헤더: 섹션에서")
-        print("  - GitHub Token: 있음")
-        print("  - Google API Key: 있음")
-        print("  - 각 키의 앞 20자리 값이 로깅되는지 확인")
+        print("  - 민감 키가 평문으로 출력되지 않는지 확인")
         
     except Exception as e:
         print(f"❌ 요청 오류: {e}")
