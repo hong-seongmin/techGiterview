@@ -109,6 +109,29 @@ export interface FileTreeNode {
   children?: FileTreeNode[]
 }
 
+export interface GraphNode {
+  id: string
+  name: string
+  val: number
+  type: string
+  density: number
+  reason?: string | null
+  importance?: string | null
+}
+
+export interface GraphLink {
+  source: string
+  target: string
+  type: string
+}
+
+export interface AnalysisGraphResponse {
+  state: 'ready' | 'empty' | 'requires_reanalysis'
+  message?: string | null
+  nodes: GraphNode[]
+  links: GraphLink[]
+}
+
 // 분석 목록을 위한 인터페이스 (QuickAccessSection과 동일)
 export interface RecentAnalysis {
   analysis_id: string

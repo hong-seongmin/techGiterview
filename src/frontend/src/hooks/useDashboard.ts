@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import type {
   AnalysisResult,
+  AnalysisGraphResponse,
   Question,
   FileTreeNode,
   RecentAnalysis,
@@ -84,7 +85,7 @@ const sanitizeQuestions = (items: Question[]): Question[] => {
   return deduped
 }
 
-type GraphStatus = 'idle' | 'loading' | 'loaded' | 'unsupported' | 'error'
+type GraphStatus = 'idle' | 'loading' | 'loaded' | 'empty' | 'needs_reanalysis' | 'error'
 type QuestionLoadSource = 'cache' | 'generated' | 'generation_wait'
 type QuestionLoadResult = {
   questions: Question[]
@@ -208,7 +209,7 @@ export function useDashboard(analysisId: string | undefined) {
   )
 
   // Graph State
-  const [graphData, setGraphData] = useState<any>(null)
+  const [graphData, setGraphData] = useState<AnalysisGraphResponse | null>(null)
   const [isLoadingGraph, setIsLoadingGraph] = useState(false)
   const [graphStatus, setGraphStatus] = useState<GraphStatus>('idle')
 
@@ -464,6 +465,10 @@ export function useDashboard(analysisId: string | undefined) {
           throw new Error(`__ANALYSIS_PENDING__:${detail}`)
         }
 
+        if (response.status === 401) {
+          throw new Error('분석 접근 토큰이 없거나 만료되었습니다. 최근 분석 목록에서 다시 열어주세요.')
+        }
+
         if (!response.ok) {
           const errorText = await response.text()
           console.error('[Dashboard] API error response:', {
@@ -561,25 +566,43 @@ export function useDashboard(analysisId: string | undefined) {
         })
         storeIssuedAnalysisToken(id, res)
 
-        if (res.status === 404) {
+        if (res.status === 401) {
           setGraphData(null)
-          setGraphStatus('unsupported')
+          setGraphStatus('error')
+          setError('분석 접근 토큰이 없거나 만료되었습니다. 최근 분석 목록에서 다시 열어주세요.')
           return false
         }
 
-        if (!res.ok) {
+        if (res.status === 404) {
+          setGraphData(null)
           setGraphStatus('error')
           return false
         }
 
-        const data = await res.json()
+        if (!res.ok) {
+          setGraphData(null)
+          setGraphStatus('error')
+          return false
+        }
+
+        const data = (await res.json()) as AnalysisGraphResponse
         setGraphData(data)
-        const hasNodes = Array.isArray(data?.nodes) && data.nodes.length > 0
-        setGraphStatus(hasNodes ? 'loaded' : 'unsupported')
-        return hasNodes
+        if (data.state === 'ready' && Array.isArray(data.nodes) && data.nodes.length > 0) {
+          setGraphStatus('loaded')
+          return true
+        }
+
+        if (data.state === 'requires_reanalysis') {
+          setGraphStatus('needs_reanalysis')
+          return false
+        }
+
+        setGraphStatus('empty')
+        return false
       })
     } catch (e) {
       console.error("Failed to fetch graph data", e)
+      setGraphData(null)
       setGraphStatus('error')
       return false
     } finally {
@@ -885,6 +908,9 @@ export function useDashboard(analysisId: string | undefined) {
         storeIssuedAnalysisToken(analysisId, response)
 
         if (!response.ok) {
+          if (response.status === 401) {
+            throw new Error('분석 접근 토큰이 없거나 만료되었습니다. 최근 분석 목록에서 다시 열어주세요.')
+          }
           throw new Error(`전체 파일 목록을 불러올 수 없습니다. (${response.status})`)
         }
 

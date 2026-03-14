@@ -6,6 +6,10 @@ import pytest
 from app.api import github as github_api
 
 
+class FakeSession:
+    pass
+
+
 @pytest.fixture(autouse=True)
 def clear_repository_caches():
     github_api.analysis_cache.clear()
@@ -93,8 +97,20 @@ async def test_get_all_repository_files_caches_by_analysis_id(monkeypatch):
 
     monkeypatch.setattr(github_api.RepositoryAnalyzer, "get_all_files", fake_get_all_files)
 
-    first = await github_api.get_all_repository_files(analysis_id, max_depth=2, max_files=100)
-    second = await github_api.get_all_repository_files(analysis_id, max_depth=2, max_files=100)
+    first = await github_api.get_all_repository_files(
+        analysis_id,
+        max_depth=2,
+        max_files=100,
+        db=FakeSession(),
+        normalized_analysis_id=analysis_id,
+    )
+    second = await github_api.get_all_repository_files(
+        analysis_id,
+        max_depth=2,
+        max_files=100,
+        db=FakeSession(),
+        normalized_analysis_id=analysis_id,
+    )
 
     assert call_count["value"] == 1
     assert first == expected_tree

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { apiFetch } from '../utils/apiUtils'
+import { createApiHeaders, getAnalysisToken } from '../utils/apiHeaders'
 import './FileContentModal.css'
 
 interface FileContentModalProps {
@@ -40,11 +42,20 @@ export const FileContentModal: React.FC<FileContentModalProps> = ({
     setIsLoading(true)
     setError(null)
     try {
-      const response = await fetch(
-        `/api/v1/repository/analysis/${analysisId}/file-content?file_path=${encodeURIComponent(filePath)}`
+      const analysisToken = getAnalysisToken(analysisId)
+      const response = await apiFetch(
+        `/api/v1/repository/analysis/${analysisId}/file-content?file_path=${encodeURIComponent(filePath)}`,
+        {
+          headers: createApiHeaders({
+            analysisToken: analysisToken || undefined,
+          }),
+        }
       )
       
       if (!response.ok) {
+        if (response.status === 401) {
+          throw new Error('분석 접근 토큰이 없거나 만료되었습니다. 최근 분석 목록에서 다시 열어주세요.')
+        }
         throw new Error('파일 내용을 불러올 수 없습니다.')
       }
 

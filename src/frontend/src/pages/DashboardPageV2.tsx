@@ -254,18 +254,24 @@ export function DashboardPageV2() {
                 <div className="v2-graph-empty">
                   <span className="v2-badge v2-badge-default">로딩 중</span>
                   <h3>코드 그래프를 불러오는 중입니다.</h3>
-                  <p>분석 가능한 의존성 그래프가 있으면 바로 표시합니다.</p>
+                  <p>핵심 파일 간 의존 관계를 시각화합니다.</p>
                 </div>
-              ) : graphStatus === 'unsupported' ? (
+              ) : graphStatus === 'empty' ? (
                 <div className="v2-graph-empty">
-                  <span className="v2-badge v2-badge-default">미지원</span>
-                  <h3>현재 서버에는 코드 그래프 API가 없습니다.</h3>
-                  <p>그래프 보기는 유지되지만, 서버가 그래프 데이터를 제공할 때만 시각화됩니다.</p>
+                  <span className="v2-badge v2-badge-default">그래프 없음</span>
+                  <h3>그래프화할 의존성 관계를 찾지 못했습니다.</h3>
+                  <p>{graphData?.message || '선택된 핵심 파일 사이에 분석 가능한 import 또는 flow 연결이 충분하지 않습니다.'}</p>
+                </div>
+              ) : graphStatus === 'needs_reanalysis' ? (
+                <div className="v2-graph-empty">
+                  <span className="v2-badge v2-badge-default">재분석 필요</span>
+                  <h3>이 분석은 그래프를 재구성할 원본 파일 내용이 없습니다.</h3>
+                  <p>{graphData?.message || '현재 서버 세션에서 저장소를 다시 분석하면 코드 그래프를 볼 수 있습니다.'}</p>
                 </div>
               ) : graphStatus === 'error' ? (
                 <div className="v2-graph-empty">
                   <span className="v2-badge v2-badge-default">오류</span>
-                  <h3>코드 그래프 로딩에 실패했습니다.</h3>
+                  <h3>코드 그래프를 불러오지 못했습니다.</h3>
                   <p>다시 탭을 열거나 새로고침해 재시도할 수 있습니다.</p>
                 </div>
               ) : (

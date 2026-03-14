@@ -9,8 +9,8 @@ import aiohttp
 import uuid
 import time
 from collections import deque
-from typing import Dict, List, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, Header
+from typing import Dict, List, Any, Optional, Literal, NamedTuple
+from fastapi import APIRouter, HTTPException, Depends, Header, Response
 from pydantic import BaseModel, HttpUrl
 from datetime import datetime, timedelta
 from sqlalchemy import func, String
@@ -18,12 +18,20 @@ from sqlalchemy import func, String
 from app.core.config import settings
 from app.services.file_importance_analyzer import SmartFileImportanceAnalyzer
 from app.services.dependency_analyzer import DependencyAnalyzer
+from app.services.analysis_graph_service import build_analysis_graph_response
 from app.core.database import get_db
+from app.core.session_token import (
+    TokenValidationError,
+    issue_analysis_token,
+    to_http_exception,
+    verify_token,
+)
 from sqlalchemy.orm import Session
 
 # 임시 메모리 저장소
 analysis_cache = {}
 all_files_cache = {}
+graph_cache = {}
 
 
 router = APIRouter()
@@ -81,6 +89,34 @@ class AnalysisResult(BaseModel):
     recommendations: List[str]
     created_at: datetime
     smart_file_analysis: Optional[Dict[str, Any]] = None
+
+
+class GraphNode(BaseModel):
+    id: str
+    name: str
+    val: float
+    type: str
+    density: float
+    reason: Optional[str] = None
+    importance: Optional[str] = None
+
+
+class GraphLink(BaseModel):
+    source: str
+    target: str
+    type: str
+
+
+class AnalysisGraphResponse(BaseModel):
+    state: Literal["ready", "empty", "requires_reanalysis"]
+    message: Optional[str] = None
+    nodes: List[GraphNode]
+    links: List[GraphLink]
+
+
+class LoadedAnalysis(NamedTuple):
+    result: AnalysisResult
+    source: Literal["cache", "db"]
 
 
 class GitHubClient:
@@ -790,6 +826,7 @@ class RepositoryAnalyzer:
 @router.post("/analyze", response_model=AnalysisResult)
 async def analyze_repository(
     request: RepositoryAnalysisRequest,
+    response: Response,
     github_token: Optional[str] = Header(None, alias="x-github-token"),
     google_api_key: Optional[str] = Header(None, alias="x-google-api-key")
 ):
@@ -880,6 +917,7 @@ async def analyze_repository(
         
         # 임시 메모리 캐시에 저장
         analysis_cache[analysis_id] = result
+        response.headers["X-Analysis-Token"] = issue_analysis_token(analysis_id)
         
         return result
         
@@ -907,6 +945,7 @@ async def get_recent_analyses(limit: int = 5, db: Session = Depends(get_db)):
         for analysis_id, result in analysis_cache.items():
             cache_analyses.append({
                 "analysis_id": analysis_id,
+                "analysis_token": issue_analysis_token(analysis_id),
                 "repository_name": result.repo_info.name,
                 "repository_owner": result.repo_info.owner,
                 "primary_language": result.repo_info.language or "Unknown",
@@ -981,7 +1020,8 @@ async def get_recent_analyses(limit: int = 5, db: Session = Depends(get_db)):
                     file_count = 450
             
             recent_analyses.append({
-                "analysis_id": analysis.id.hex if hasattr(analysis.id, 'hex') else str(analysis.id).replace('-', ''),
+                "analysis_id": str(analysis.id),
+                "analysis_token": issue_analysis_token(str(analysis.id)),
                 "repository_name": repo_name,
                 "repository_owner": repo_owner,
                 "primary_language": primary_language,
@@ -1026,65 +1066,76 @@ async def get_recent_analyses(limit: int = 5, db: Session = Depends(get_db)):
         }
 
 
-@router.get("/analysis/{analysis_id}", response_model=AnalysisResult)
-async def get_analysis_result(analysis_id: str, db: Session = Depends(get_db)):
-    """분석 결과 조회 - 메모리 캐시 우선, 없으면 데이터베이스에서 조회"""
+def _normalize_analysis_id(analysis_id: str) -> str:
     try:
-        # UUID 검증
-        uuid.UUID(analysis_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid analysis ID format")
-    
-    # 1. 메모리 캐시에서 조회 (우선)
+        return str(uuid.UUID(analysis_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid analysis ID format") from exc
+
+
+def require_analysis_access(
+    analysis_id: str,
+    x_analysis_token: Optional[str] = Header(None, alias="x-analysis-token"),
+) -> str:
+    normalized_analysis_id = _normalize_analysis_id(analysis_id)
+
+    if not x_analysis_token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        verify_token(
+            x_analysis_token,
+            expected_scope="analysis",
+            expected_analysis_id=normalized_analysis_id,
+        )
+    except TokenValidationError as exc:
+        raise to_http_exception(exc) from exc
+
+    return normalized_analysis_id
+
+
+async def _load_analysis_result_internal(analysis_id: str, db: Session) -> LoadedAnalysis:
+    analysis_id = _normalize_analysis_id(analysis_id)
+
     if analysis_id in analysis_cache:
-        return analysis_cache[analysis_id]
-    
-    # 2. 데이터베이스에서 조회 (폴백)
+        return LoadedAnalysis(result=analysis_cache[analysis_id], source="cache")
+
     try:
         from app.models.repository import RepositoryAnalysis
-        
-        # SQLite에서는 UUID가 문자열로 저장되므로 문자열 비교 사용
-        # 하이픈이 있는 형태와 없는 형태 모두 시도
+
         analysis_id_no_hyphens = analysis_id.replace('-', '')
         analysis_db = db.query(RepositoryAnalysis)\
             .filter(
                 func.cast(RepositoryAnalysis.id, String).in_([analysis_id, analysis_id_no_hyphens])
             )\
             .first()
-        
+
         if not analysis_db:
             raise HTTPException(status_code=404, detail="Analysis not found")
-        
-        # 데이터베이스 결과를 AnalysisResult 형식으로 변환
+
         repo_url_parts = analysis_db.repository_url.replace("https://github.com/", "").split("/")
         owner = repo_url_parts[0] if len(repo_url_parts) > 0 else "Unknown"
         repo_name = repo_url_parts[1] if len(repo_url_parts) > 1 else "Unknown"
-        
+
         repo_info = RepositoryInfo(
             name=repo_name,
             owner=owner,
             description=f"{owner}/{repo_name} repository",
             language=analysis_db.primary_language or "Unknown",
-            stars=0,  # 데이터베이스에 없는 경우 기본값
+            stars=0,
             forks=0,
             size=0,
             topics=[],
             default_branch="main"
         )
-        
-        # 기본 파일 정보 (실제로는 별도 테이블에서 가져와야 함)
-        key_files = []
-        
-        # 기술 스택 정보
-        tech_stack = analysis_db.tech_stack if analysis_db.tech_stack else {}
-        
+
         analysis_result = AnalysisResult(
             success=True,
             analysis_id=str(analysis_db.id),
             selected_provider_id=(analysis_db.analysis_metadata or {}).get("selected_provider_id"),
             repo_info=repo_info,
-            tech_stack=tech_stack,
-            key_files=key_files,
+            tech_stack=analysis_db.tech_stack if analysis_db.tech_stack else {},
+            key_files=[],
             summary=f"{repo_name} 저장소 분석 결과",
             recommendations=[
                 "테스트 코드를 추가하여 코드 품질을 향상시키세요.",
@@ -1093,35 +1144,90 @@ async def get_analysis_result(analysis_id: str, db: Session = Depends(get_db)):
             ],
             created_at=analysis_db.created_at
         )
-        
-        # 메모리 캐시에도 저장 (다음번 조회 최적화)
+
         analysis_cache[analysis_id] = analysis_result
-        
-        return analysis_result
-        
+        return LoadedAnalysis(result=analysis_result, source="db")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[DB_FALLBACK] Error loading from database: {e}")
-        raise HTTPException(status_code=404, detail="Analysis not found")
+        raise HTTPException(status_code=404, detail="Analysis not found") from e
+
+
+@router.get("/analysis/{analysis_id}", response_model=AnalysisResult)
+async def get_analysis_result(
+    analysis_id: str,
+    response: Response,
+    db: Session = Depends(get_db),
+    normalized_analysis_id: str = Depends(require_analysis_access),
+):
+    """분석 결과 조회 - 메모리 캐시 우선, 없으면 데이터베이스에서 조회"""
+    loaded = await _load_analysis_result_internal(normalized_analysis_id, db)
+    response.headers["X-Analysis-Token"] = issue_analysis_token(normalized_analysis_id)
+    return loaded.result
+
+
+@router.get("/analysis/{analysis_id}/graph", response_model=AnalysisGraphResponse)
+async def get_analysis_graph(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+    normalized_analysis_id: str = Depends(require_analysis_access),
+):
+    """분석 결과에 포함된 핵심 파일 내용으로 코드 그래프를 생성한다."""
+    if normalized_analysis_id in graph_cache:
+        return graph_cache[normalized_analysis_id]
+
+    loaded = await _load_analysis_result_internal(normalized_analysis_id, db)
+    analysis_result = loaded.result
+
+    has_graphable_content = any(file_info.content for file_info in analysis_result.key_files)
+    if not has_graphable_content and loaded.source == "db":
+        response = AnalysisGraphResponse(
+            state="requires_reanalysis",
+            message="이 분석은 현재 서버 세션에 원본 파일 내용이 없어 코드 그래프를 다시 만들 수 없습니다.",
+            nodes=[],
+            links=[],
+        )
+        graph_cache[normalized_analysis_id] = response
+        return response
+
+    try:
+        response_payload = build_analysis_graph_response(
+            analysis_result.key_files,
+            repo_name=analysis_result.repo_info.name,
+        )
+
+        if response_payload["state"] == "empty" and loaded.source == "db":
+            response_payload = {
+                "state": "requires_reanalysis",
+                "message": "이 분석은 현재 서버 세션에 원본 파일 내용이 없어 코드 그래프를 다시 만들 수 없습니다.",
+                "nodes": [],
+                "links": [],
+            }
+
+        response = AnalysisGraphResponse(**response_payload)
+        graph_cache[normalized_analysis_id] = response
+        return response
+    except Exception as e:
+        print(f"[GRAPH_API] Error building graph for {normalized_analysis_id}: {e}")
+        raise HTTPException(status_code=500, detail="코드 그래프를 생성하는 중 오류가 발생했습니다.") from e
 
 
 @router.get("/analysis/{analysis_id}/all-files", response_model=List[FileTreeNode])
-async def get_all_repository_files(analysis_id: str, max_depth: int = 3, max_files: int = 500):
+async def get_all_repository_files(
+    analysis_id: str,
+    max_depth: int = 3,
+    max_files: int = 500,
+    db: Session = Depends(get_db),
+    normalized_analysis_id: str = Depends(require_analysis_access),
+):
     """분석된 저장소의 모든 파일 트리 구조 조회"""
-    try:
-        # UUID 검증
-        uuid.UUID(analysis_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid analysis ID format")
-    
-    # 메모리 캐시에서 분석 결과 조회
-    if analysis_id not in analysis_cache:
-        raise HTTPException(status_code=404, detail="Analysis not found")
-    
-    analysis_result = analysis_cache[analysis_id]
+    loaded = await _load_analysis_result_internal(normalized_analysis_id, db)
+    analysis_result = loaded.result
     analyzer = RepositoryAnalyzer()
 
     try:
-        cache_key = (analysis_id, max_depth, max_files)
+        cache_key = (normalized_analysis_id, max_depth, max_files)
         if cache_key in all_files_cache:
             return all_files_cache[cache_key]
 
@@ -1167,19 +1273,15 @@ async def get_all_repository_files(analysis_id: str, max_depth: int = 3, max_fil
 
 
 @router.get("/analysis/{analysis_id}/file-content")
-async def get_file_content(analysis_id: str, file_path: str):
+async def get_file_content(
+    analysis_id: str,
+    file_path: str,
+    db: Session = Depends(get_db),
+    normalized_analysis_id: str = Depends(require_analysis_access),
+):
     """특정 파일의 내용 조회 - 캐시 우선, 없으면 GitHub API 요청"""
-    try:
-        # UUID 검증
-        uuid.UUID(analysis_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid analysis ID format")
-    
-    # 메모리 캐시에서 분석 결과 조회
-    if analysis_id not in analysis_cache:
-        raise HTTPException(status_code=404, detail="Analysis not found")
-    
-    analysis_result = analysis_cache[analysis_id]
+    loaded = await _load_analysis_result_internal(normalized_analysis_id, db)
+    analysis_result = loaded.result
     
     try:
         # 1. 먼저 캐시된 파일 목록에서 내용 찾기
@@ -1261,6 +1363,7 @@ async def list_analyses(skip: int = 0, limit: int = 10):
     for analysis_id, result in analysis_cache.items():
         analyses_list.append({
             "analysis_id": analysis_id,
+            "analysis_token": issue_analysis_token(analysis_id),
             "repository_url": f"https://github.com/{result.repo_info.owner}/{result.repo_info.name}",
             "repository_name": f"{result.repo_info.owner}/{result.repo_info.name}",
             "primary_language": result.repo_info.language,
@@ -1298,7 +1401,7 @@ async def test_github_connection():
 
 
 @router.post("/analyze-simple", response_model=AnalysisResult)
-async def analyze_repository_simple(request: RepositoryAnalysisRequest):
+async def analyze_repository_simple(request: RepositoryAnalysisRequest, response: Response):
     """간단한 저장소 분석 - 캐시 저장 포함"""
     try:
         # URL 유효성 검증
@@ -1375,7 +1478,8 @@ async def analyze_repository_simple(request: RepositoryAnalysisRequest):
         
         # analysis_cache에 저장하여 대시보드에서 조회 가능하도록 함
         analysis_cache[analysis_id] = analysis_result
-        
+        response.headers["X-Analysis-Token"] = issue_analysis_token(analysis_id)
+
         print(f"[ANALYZE_SIMPLE] 분석 결과 캐시에 저장: {analysis_id}")
         print(f"[ANALYZE_SIMPLE] 캐시 크기: {len(analysis_cache)}")
         
@@ -1431,6 +1535,7 @@ async def debug_cache():
     return {
         "cache_size": len(analysis_cache),
         "all_files_cache_size": len(all_files_cache),
+        "graph_cache_size": len(graph_cache),
         "cached_analysis_ids": list(analysis_cache.keys()),
         "analysis_details": [
             {
@@ -1448,12 +1553,15 @@ async def clear_cache():
     """메모리 캐시 초기화 (디버깅용)"""
     cache_size_before = len(analysis_cache)
     all_files_cache_size_before = len(all_files_cache)
+    graph_cache_size_before = len(graph_cache)
     analysis_cache.clear()
     all_files_cache.clear()
+    graph_cache.clear()
     
     return {
         "message": "캐시가 성공적으로 초기화되었습니다",
         "cleared_items": cache_size_before,
         "cleared_all_files_items": all_files_cache_size_before,
+        "cleared_graph_items": graph_cache_size_before,
         "current_cache_size": len(analysis_cache)
     }
