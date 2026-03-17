@@ -4,22 +4,28 @@ Question Generation API Router
 질문 생성 관련 API 엔드포인트
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import re
 import uuid
 import json
+import time
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.agents.question_generator import QuestionGenerator
 from app.core.ai_service import AIProvider
-from app.core.database import engine
+from app.core.database import engine, SessionLocal
 
 router = APIRouter()
 
-# 질문 캐시 (분석 ID별로 질문 저장)
-question_cache = {}
+QUESTION_GENERATION_EXPERIMENT_ID = "question_generation_v1"
+DEFAULT_GENERATOR_VARIANT = "generator_v1"
+
+# 질문 캐시 (variant-aware cache key -> payload)
+question_cache: Dict[str, "QuestionCacheData"] = {}
+question_cache_active_keys: Dict[str, str] = {}
 
 
 def extract_api_keys_from_headers(
@@ -88,10 +94,141 @@ class QuestionResponse(BaseModel):
 
 class QuestionCacheData(BaseModel):
     """질문 캐시 데이터 구조"""
+    analysis_id: str
+    cache_key: str
+    experiment_id: str
+    selector_variant: str
+    generator_variant: str
+    provider_id: Optional[str] = None
     original_questions: List[QuestionResponse]  # AI 원본 질문
     parsed_questions: List[QuestionResponse]   # 파싱된 개별 질문
     question_groups: Dict[str, List[str]]      # 그룹별 질문 관계 (parent_id -> [sub_question_ids])
     created_at: str
+
+
+def _extract_selector_context(analysis_result: Optional[Dict[str, Any]]) -> Tuple[str, Optional[str]]:
+    selector_experiment = (
+        (analysis_result or {})
+        .get("smart_file_analysis", {})
+        .get("selector_experiment", {})
+    )
+
+    selector_variant = selector_experiment.get("display_variant") or "selector_v1"
+    selector_experiment_id = selector_experiment.get("experiment_id")
+    return selector_variant, selector_experiment_id
+
+
+def build_question_cache_key(
+    analysis_id: str,
+    selector_variant: str,
+    generator_variant: str = DEFAULT_GENERATOR_VARIANT,
+) -> str:
+    return f"{analysis_id}:{selector_variant}:{generator_variant}"
+
+
+def get_question_cache_entry(
+    analysis_id: str,
+    *,
+    selector_variant: Optional[str] = None,
+    generator_variant: str = DEFAULT_GENERATOR_VARIANT,
+) -> Optional[QuestionCacheData]:
+    if selector_variant:
+        return question_cache.get(
+            build_question_cache_key(analysis_id, selector_variant, generator_variant)
+        )
+
+    active_key = question_cache_active_keys.get(analysis_id)
+    if active_key:
+        return question_cache.get(active_key)
+
+    legacy_entry = question_cache.get(analysis_id)
+    if legacy_entry:
+        return legacy_entry
+    return None
+
+
+def _store_question_cache_entry(cache_data: QuestionCacheData, *, make_active: bool = True) -> None:
+    question_cache[cache_data.cache_key] = cache_data
+    if make_active:
+        question_cache_active_keys[cache_data.analysis_id] = cache_data.cache_key
+
+
+def _serialize_question(question: QuestionResponse) -> Dict[str, Any]:
+    return question.model_dump()
+
+
+def _serialize_question_list(questions: List[QuestionResponse]) -> List[Dict[str, Any]]:
+    return [_serialize_question(question) for question in questions]
+
+
+def _save_question_generation_run(
+    *,
+    analysis_id: str,
+    experiment_id: str,
+    selector_experiment_id: Optional[str],
+    selector_variant: str,
+    generator_variant: str,
+    provider_id: Optional[str],
+    original_questions: List[QuestionResponse],
+    parsed_questions: List[QuestionResponse],
+    question_groups: Dict[str, List[str]],
+    latency_ms: int,
+) -> Optional[str]:
+    from app.models.repository import QuestionGenerationRun, RepositoryAnalysis
+
+    db = SessionLocal()
+    try:
+        run = QuestionGenerationRun(
+            analysis_id=uuid.UUID(analysis_id),
+            experiment_id=experiment_id,
+            selector_experiment_id=selector_experiment_id,
+            selector_variant=selector_variant,
+            generator_variant=generator_variant,
+            provider=provider_id,
+            generated_question_count=len(original_questions),
+            parsed_question_count=len(parsed_questions),
+            latency_ms=latency_ms,
+            questions_payload={
+                "original_questions": _serialize_question_list(original_questions),
+                "parsed_questions": _serialize_question_list(parsed_questions),
+                "question_groups": question_groups,
+            },
+            run_metadata={
+                "analysis_id": analysis_id,
+                "provider_id": provider_id,
+            },
+        )
+        db.add(run)
+
+        analysis_row = db.query(RepositoryAnalysis).filter(
+            RepositoryAnalysis.id == uuid.UUID(analysis_id)
+        ).first()
+        if analysis_row:
+            analysis_metadata = analysis_row.analysis_metadata or {}
+            if not isinstance(analysis_metadata, dict):
+                analysis_metadata = {}
+            analysis_metadata["latest_question_generation"] = {
+                "experiment_id": experiment_id,
+                "selector_experiment_id": selector_experiment_id,
+                "selector_variant": selector_variant,
+                "generator_variant": generator_variant,
+                "provider_id": provider_id,
+                "generated_question_count": len(original_questions),
+                "parsed_question_count": len(parsed_questions),
+                "latency_ms": latency_ms,
+                "created_at": datetime.now().isoformat(),
+            }
+            analysis_row.analysis_metadata = analysis_metadata
+
+        db.commit()
+        db.refresh(run)
+        return str(run.id)
+    except Exception as exc:
+        db.rollback()
+        print(f"[QUESTION_RUN] Error saving generation run: {exc}")
+        return None
+    finally:
+        db.close()
 
 
 def create_question_groups(questions: List[QuestionResponse]) -> Dict[str, List[str]]:
@@ -187,24 +324,41 @@ def parse_compound_question(question: QuestionResponse) -> List[QuestionResponse
         List[QuestionResponse]: 정리된 질문 리스트
     """
     question_text = question.question
-    
-    # 1. 마크다운 제목과 불필요한 내용 제거
-    question_text = re.sub(r'^#{1,6}\s+.*$', '', question_text, flags=re.MULTILINE)  # 마크다운 제목 제거
-    question_text = re.sub(r'^---+\s*$', '', question_text, flags=re.MULTILINE)     # 구분자 제거
-    question_text = re.sub(r'\n\s*\n', '\n\n', question_text)                      # 여러 줄바꿈 정리
-    
-    # 2. 줄 단위로 분리하여 처리
+
+    # 1. 코드 블록과 설명 섹션 제거
+    question_text = re.sub(r"```.*?```", " ", question_text, flags=re.DOTALL)
+    question_text = re.split(r"\*\*(?:근거|의도|추가 설명|참조 코드|파일 경로)\*\*[:：]", question_text, maxsplit=1)[0]
+    question_text = re.split(r"(?:근거|의도|추가 설명|참조 코드|파일 경로)[:：]", question_text, maxsplit=1)[0]
+
+    # 2. 마크다운 제목과 불필요한 내용 제거
+    question_text = re.sub(r'^#{1,6}\s+.*$', '', question_text, flags=re.MULTILINE)
+    question_text = re.sub(r'^---+\s*$', '', question_text, flags=re.MULTILINE)
+    question_text = re.sub(r'\n\s*\n', '\n\n', question_text)
+
+    # 3. 줄 단위로 분리하여 처리
     lines = question_text.split('\n')
     processed_lines = []
+    in_code_block = False
     
     for line in lines:
         line_stripped = line.strip()
         if not line_stripped:
             continue
+
+        if line_stripped.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
             
         # 마크다운 제목 스킵
         if re.match(r'^#{1,6}\s+', line_stripped):
             continue
+
+        if re.match(r"^\*\*(?:근거|의도|추가 설명|참조 코드|파일 경로)\*\*[:：]", line_stripped):
+            break
+        if re.match(r"^(?:근거|의도|추가 설명|참조 코드|파일 경로)[:：]", line_stripped):
+            break
             
         # numbered list 항목의 번호 제거 및 정리
         clean_line = line_stripped
@@ -220,15 +374,20 @@ def parse_compound_question(question: QuestionResponse) -> List[QuestionResponse
             if re.match(pattern, clean_line):
                 clean_line = re.sub(pattern, '', clean_line).strip()
                 break
+
+        clean_line = re.sub(r'^\*\*질문\*\*[:：]?\s*', '', clean_line, flags=re.IGNORECASE)
+        clean_line = clean_line.replace("**", "").strip()
+        clean_line = re.sub(r'^질문[:：]?\s*', '', clean_line, flags=re.IGNORECASE)
         
         # 빈 줄이 아닌 경우만 추가
         if clean_line:
             processed_lines.append(clean_line)
     
-    # 3. 처리된 내용을 하나의 질문으로 결합
-    cleaned_question = ' '.join(processed_lines).strip()
+    # 4. 처리된 내용을 하나의 질문으로 결합
+    cleaned_question = ' '.join(processed_lines).strip().strip('"').strip("'")
+    cleaned_question = re.sub(r'\s+', ' ', cleaned_question)
     
-    # 4. 정리된 질문이 유효한지 확인
+    # 5. 정리된 질문이 유효한지 확인
     if (len(cleaned_question) > 20 and 
         any(keyword in cleaned_question for keyword in ['설명해주세요', '어떻게', '무엇', '왜', '방법', '차이점', '?', '예시', '구체적'])):
         
@@ -236,7 +395,7 @@ def parse_compound_question(question: QuestionResponse) -> List[QuestionResponse
         question.question = cleaned_question
         return [question]
     
-    # 5. 유효하지 않은 경우 원본 그대로 반환
+    # 6. 유효하지 않은 경우 원본 그대로 반환
     return [question]
 
 
@@ -266,6 +425,9 @@ class QuestionGenerationResult(BaseModel):
     questions: List[QuestionResponse]
     analysis_id: Optional[str] = None
     error: Optional[str] = None
+    experiment_id: Optional[str] = None
+    selector_variant: Optional[str] = None
+    generator_variant: Optional[str] = None
 
 
 @router.post("/generate", response_model=QuestionGenerationResult)
@@ -282,24 +444,38 @@ async def generate_questions(
         analysis_id = None
         if request.analysis_result and "analysis_id" in request.analysis_result:
             analysis_id = request.analysis_result["analysis_id"]
-        
+
+        selector_variant, selector_experiment_id = _extract_selector_context(request.analysis_result)
+        generator_variant = DEFAULT_GENERATOR_VARIANT
+
         # 이미 생성된 질문이 있는지 확인 (강제 재생성이 아닌 경우)
-        if analysis_id and analysis_id in question_cache and not request.force_regenerate:
-            cache_data = question_cache[analysis_id]
-            return QuestionGenerationResult(
-                success=True,
-                questions=cache_data.parsed_questions,
-                analysis_id=analysis_id
+        if analysis_id and not request.force_regenerate:
+            cache_data = get_question_cache_entry(
+                analysis_id,
+                selector_variant=selector_variant,
+                generator_variant=generator_variant,
             )
-        
+            if cache_data:
+                question_cache_active_keys[analysis_id] = cache_data.cache_key
+                return QuestionGenerationResult(
+                    success=True,
+                    questions=cache_data.parsed_questions,
+                    analysis_id=analysis_id,
+                    experiment_id=cache_data.experiment_id,
+                    selector_variant=cache_data.selector_variant,
+                    generator_variant=cache_data.generator_variant,
+                )
+
+        started_at = time.perf_counter()
+
         # 헤더에서 API 키 추출
         api_keys = extract_api_keys_from_headers(github_token, google_api_key, upstage_api_key)
-        
+
         # 질문 생성기 초기화
         generator = QuestionGenerator(
             preferred_provider=resolve_provider_id(request.provider_id)
         )
-        
+
         # 질문 생성 실행 - QuestionGenerator 내부 기본값 사용 (3가지 타입 균등 분배)
         result = await generator.generate_questions(
             repo_url=request.repo_url,
@@ -309,10 +485,10 @@ async def generate_questions(
             analysis_data=request.analysis_result,
             api_keys=api_keys  # API 키 전달
         )
-        
+
         if not result["success"]:
             raise HTTPException(status_code=500, detail=result.get("error", "질문 생성 실패"))
-        
+
         # 응답 형식에 맞게 변환
         questions = []
         for q in result["questions"]:
@@ -328,31 +504,71 @@ async def generate_questions(
                 technology=q.get("technology"),
                 pattern=q.get("pattern")
             ))
-        
+
         # 질문 파싱 처리 (compound question 분리)
         parsed_questions = parse_questions_list(questions)
-        
+
         # 질문 그룹 관계 생성
         question_groups = create_question_groups(parsed_questions)
-        
+
         # 캐시에 저장 (구조화된 데이터)
         if analysis_id:
-            from datetime import datetime
             cache_data = QuestionCacheData(
+                analysis_id=analysis_id,
+                cache_key=build_question_cache_key(
+                    analysis_id,
+                    selector_variant,
+                    generator_variant,
+                ),
+                experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
+                selector_variant=selector_variant,
+                generator_variant=generator_variant,
+                provider_id=request.provider_id,
                 original_questions=questions,
                 parsed_questions=parsed_questions,
                 question_groups=question_groups,
                 created_at=datetime.now().isoformat()
             )
-            question_cache[analysis_id] = cache_data
-            
+            _store_question_cache_entry(cache_data)
+
             # DB에도 저장하여 영구 보존
-            await _save_questions_to_db(analysis_id, parsed_questions)
-        
+            await _save_questions_to_db(
+                analysis_id,
+                parsed_questions,
+                selector_variant=selector_variant,
+                generator_variant=generator_variant,
+                experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
+            )
+
+            _save_question_generation_run(
+                analysis_id=analysis_id,
+                experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
+                selector_experiment_id=selector_experiment_id,
+                selector_variant=selector_variant,
+                generator_variant=generator_variant,
+                provider_id=request.provider_id,
+                original_questions=questions,
+                parsed_questions=parsed_questions,
+                question_groups=question_groups,
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+            )
+
+            return QuestionGenerationResult(
+                success=True,
+                questions=parsed_questions,
+                analysis_id=analysis_id,
+                experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
+                selector_variant=selector_variant,
+                generator_variant=generator_variant,
+            )
+
         return QuestionGenerationResult(
             success=True,
             questions=parsed_questions,
-            analysis_id=analysis_id
+            analysis_id=analysis_id,
+            experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
+            selector_variant=selector_variant,
+            generator_variant=generator_variant,
         )
         
     except Exception as e:
@@ -367,15 +583,17 @@ async def generate_questions(
 async def get_questions(analysis_id: str):
     """분석 ID로 질문 조회"""
     try:
-        if analysis_id not in question_cache:
+        cache_data = get_question_cache_entry(analysis_id)
+        if not cache_data:
             raise HTTPException(status_code=404, detail="질문을 찾을 수 없습니다")
-        
-        cache_data = question_cache[analysis_id]
+
         return {
             "success": True,
             "questions": cache_data.parsed_questions,
             "question_groups": cache_data.question_groups,
-            "created_at": cache_data.created_at
+            "created_at": cache_data.created_at,
+            "selector_variant": cache_data.selector_variant,
+            "generator_variant": cache_data.generator_variant,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -385,15 +603,17 @@ async def get_questions(analysis_id: str):
 async def get_question_groups(analysis_id: str):
     """질문 그룹 정보 조회"""
     try:
-        if analysis_id not in question_cache:
+        cache_data = get_question_cache_entry(analysis_id)
+        if not cache_data:
             raise HTTPException(status_code=404, detail="질문을 찾을 수 없습니다")
-        
-        cache_data = question_cache[analysis_id]
+
         return {
             "success": True,
             "question_groups": cache_data.question_groups,
             "total_questions": len(cache_data.parsed_questions),
-            "total_groups": len(cache_data.question_groups)
+            "total_groups": len(cache_data.question_groups),
+            "selector_variant": cache_data.selector_variant,
+            "generator_variant": cache_data.generator_variant,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -406,6 +626,7 @@ async def clear_question_cache():
         global question_cache
         cache_count = len(question_cache)
         question_cache.clear()
+        question_cache_active_keys.clear()
         
         return {
             "success": True,
@@ -421,17 +642,22 @@ async def get_cache_status():
     """질문 캐시 상태 조회"""
     try:
         cache_info = {}
-        for analysis_id, cache_data in question_cache.items():
-            cache_info[analysis_id] = {
+        for cache_key, cache_data in question_cache.items():
+            cache_info[cache_key] = {
+                "analysis_id": cache_data.analysis_id,
+                "cache_key": cache_key,
                 "original_questions_count": len(cache_data.original_questions),
                 "parsed_questions_count": len(cache_data.parsed_questions),
                 "groups_count": len(cache_data.question_groups),
-                "created_at": cache_data.created_at
+                "created_at": cache_data.created_at,
+                "selector_variant": cache_data.selector_variant,
+                "generator_variant": cache_data.generator_variant,
             }
         
         return {
             "success": True,
             "total_cached_analyses": len(question_cache),
+            "active_cache_keys": question_cache_active_keys,
             "cache_details": cache_info
         }
     except Exception as e:
@@ -443,39 +669,43 @@ async def get_questions_by_analysis(analysis_id: str):
     """분석 ID로 생성된 질문 조회 - 메모리 캐시 우선, 없으면 DB 조회"""
     try:
         # 1. 먼저 메모리 캐시에서 조회
-        if analysis_id in question_cache:
+        cache_data = get_question_cache_entry(analysis_id)
+        if cache_data:
             print(f"[QUESTIONS] Found questions in memory cache for {analysis_id}")
-            cache_data = question_cache[analysis_id]
-            
-            # 캐시 데이터 구조 확인
-            questions = []
-            if hasattr(cache_data, 'parsed_questions'):
-                questions = cache_data.parsed_questions
-            elif hasattr(cache_data, 'questions'):
-                questions = cache_data.questions
-            elif isinstance(cache_data, list):
-                questions = cache_data
-            
+
             return QuestionGenerationResult(
                 success=True,
-                questions=questions,
-                analysis_id=analysis_id
+                questions=cache_data.parsed_questions,
+                analysis_id=analysis_id,
+                experiment_id=cache_data.experiment_id,
+                selector_variant=cache_data.selector_variant,
+                generator_variant=cache_data.generator_variant,
             )
         
         # 2. 메모리 캐시에 없으면 DB에서 조회
         print(f"[QUESTIONS] Memory cache miss, checking database for {analysis_id}")
-        db_questions = await _load_questions_from_db(analysis_id)
+        db_questions, cache_metadata = await _load_questions_from_db(analysis_id)
         
         if db_questions:
             print(f"[QUESTIONS] Found {len(db_questions)} questions in database, restoring to cache")
             
             # DB에서 가져온 질문들을 메모리 캐시에 복원
-            await _restore_questions_to_cache(analysis_id, db_questions)
+            await _restore_questions_to_cache(
+                analysis_id,
+                db_questions,
+                experiment_id=cache_metadata.get("experiment_id", QUESTION_GENERATION_EXPERIMENT_ID),
+                selector_variant=cache_metadata.get("selector_variant", "selector_v1"),
+                generator_variant=cache_metadata.get("generator_variant", DEFAULT_GENERATOR_VARIANT),
+                provider_id=cache_metadata.get("provider_id"),
+            )
             
             return QuestionGenerationResult(
                 success=True,
                 questions=db_questions,
-                analysis_id=analysis_id
+                analysis_id=analysis_id,
+                experiment_id=cache_metadata.get("experiment_id", QUESTION_GENERATION_EXPERIMENT_ID),
+                selector_variant=cache_metadata.get("selector_variant", "selector_v1"),
+                generator_variant=cache_metadata.get("generator_variant", DEFAULT_GENERATOR_VARIANT),
             )
         
         # 3. 메모리 캐시와 DB 모두에 없음
@@ -521,12 +751,15 @@ async def debug_question_cache():
         "cached_analysis_ids": list(question_cache.keys()),
         "cache_details": [
             {
-                "analysis_id": analysis_id,
-                "original_question_count": len(cache_data.original_questions) if hasattr(cache_data, 'original_questions') else 0,
-                "parsed_question_count": len(cache_data.parsed_questions) if hasattr(cache_data, 'parsed_questions') else 0,
-                "question_types": list(set(q.type for q in cache_data.parsed_questions)) if hasattr(cache_data, 'parsed_questions') else []
+                "analysis_id": cache_data.analysis_id,
+                "cache_key": cache_key,
+                "original_question_count": len(cache_data.original_questions),
+                "parsed_question_count": len(cache_data.parsed_questions),
+                "selector_variant": cache_data.selector_variant,
+                "generator_variant": cache_data.generator_variant,
+                "question_types": list(set(q.type for q in cache_data.parsed_questions))
             }
-            for analysis_id, cache_data in question_cache.items()
+            for cache_key, cache_data in question_cache.items()
         ]
     }
 
@@ -535,10 +768,10 @@ async def debug_question_cache():
 async def debug_original_questions(analysis_id: str):
     """원본 질문 확인 (디버깅용)"""
     try:
-        if analysis_id not in question_cache:
+        cache_data = get_question_cache_entry(analysis_id)
+        if not cache_data:
             raise HTTPException(status_code=404, detail="질문을 찾을 수 없습니다")
-        
-        cache_data = question_cache[analysis_id]
+
         return {
             "success": True,
             "original_questions": [
@@ -552,7 +785,9 @@ async def debug_original_questions(analysis_id: str):
                 for q in cache_data.original_questions
             ],
             "parsed_questions_count": len(cache_data.parsed_questions),
-            "groups_count": len(cache_data.question_groups)
+            "groups_count": len(cache_data.question_groups),
+            "selector_variant": cache_data.selector_variant,
+            "generator_variant": cache_data.generator_variant,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -562,8 +797,6 @@ async def debug_original_questions(analysis_id: str):
 async def add_test_questions(analysis_id: str):
     """테스트용 질문 추가 (디버깅용)"""
     try:
-        from datetime import datetime
-        
         # 테스트용 질문 생성
         test_questions = [
             QuestionResponse(
@@ -603,12 +836,17 @@ async def add_test_questions(analysis_id: str):
         
         # 캐시에 저장
         cache_data = QuestionCacheData(
+            analysis_id=analysis_id,
+            cache_key=build_question_cache_key(analysis_id, "selector_v1", DEFAULT_GENERATOR_VARIANT),
+            experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
+            selector_variant="selector_v1",
+            generator_variant=DEFAULT_GENERATOR_VARIANT,
             original_questions=test_questions,
             parsed_questions=parsed_questions,
             question_groups=question_groups,
             created_at=datetime.now().isoformat()
         )
-        question_cache[analysis_id] = cache_data
+        _store_question_cache_entry(cache_data)
         
         return {
             "success": True,
@@ -629,11 +867,14 @@ async def debug_question_cache():
         "cached_analysis_ids": list(question_cache.keys()),
         "cache_details": [
             {
-                "analysis_id": analysis_id,
+                "analysis_id": cache_data.analysis_id,
+                "cache_key": cache_key,
                 "question_count": len(cache_data.parsed_questions),
-                "created_at": cache_data.created_at
+                "created_at": cache_data.created_at,
+                "selector_variant": cache_data.selector_variant,
+                "generator_variant": cache_data.generator_variant,
             }
-            for analysis_id, cache_data in question_cache.items()
+            for cache_key, cache_data in question_cache.items()
         ]
     }
 
@@ -643,6 +884,7 @@ async def clear_question_cache():
     """질문 캐시 초기화 (디버깅용)"""
     cache_size_before = len(question_cache)
     question_cache.clear()
+    question_cache_active_keys.clear()
     
     return {
         "message": "질문 캐시가 성공적으로 초기화되었습니다",
@@ -651,7 +893,7 @@ async def clear_question_cache():
     }
 
 
-async def _load_questions_from_db(analysis_id: str) -> List[QuestionResponse]:
+async def _load_questions_from_db(analysis_id: str) -> Tuple[List[QuestionResponse], Dict[str, Any]]:
     """데이터베이스에서 질문 조회"""
     try:
         with engine.connect() as conn:
@@ -667,7 +909,31 @@ async def _load_questions_from_db(analysis_id: str) -> List[QuestionResponse]:
             ), {"analysis_id": analysis_id})
             
             questions = []
+            cache_metadata: Dict[str, Any] = {
+                "experiment_id": QUESTION_GENERATION_EXPERIMENT_ID,
+                "selector_variant": "selector_v1",
+                "generator_variant": DEFAULT_GENERATOR_VARIANT,
+                "provider_id": None,
+            }
             for row in result:
+                context_value = row[6]
+                if isinstance(context_value, str):
+                    try:
+                        context_value = json.loads(context_value)
+                    except json.JSONDecodeError:
+                        context_value = {}
+                elif not isinstance(context_value, dict):
+                    context_value = {}
+
+                experiment_meta = context_value.get("experiment", {})
+                if experiment_meta:
+                    cache_metadata = {
+                        "experiment_id": experiment_meta.get("experiment_id", QUESTION_GENERATION_EXPERIMENT_ID),
+                        "selector_variant": experiment_meta.get("selector_variant", "selector_v1"),
+                        "generator_variant": experiment_meta.get("generator_variant", DEFAULT_GENERATOR_VARIANT),
+                        "provider_id": experiment_meta.get("provider_id"),
+                    }
+
                 # expected_points JSON 파싱
                 expected_points = None
                 if row[4]:  # expected_points 필드
@@ -692,23 +958,40 @@ async def _load_questions_from_db(analysis_id: str) -> List[QuestionResponse]:
                 questions.append(question)
             
             print(f"[DB] Loaded {len(questions)} questions from database for analysis {analysis_id}")
-            return questions
+            return questions, cache_metadata
             
     except Exception as e:
         print(f"[DB] Error loading questions from database: {e}")
-        return []
+        return [], {
+            "experiment_id": QUESTION_GENERATION_EXPERIMENT_ID,
+            "selector_variant": "selector_v1",
+            "generator_variant": DEFAULT_GENERATOR_VARIANT,
+            "provider_id": None,
+        }
 
 
-async def _restore_questions_to_cache(analysis_id: str, questions: List[QuestionResponse]):
+async def _restore_questions_to_cache(
+    analysis_id: str,
+    questions: List[QuestionResponse],
+    *,
+    experiment_id: str = QUESTION_GENERATION_EXPERIMENT_ID,
+    selector_variant: str = "selector_v1",
+    generator_variant: str = DEFAULT_GENERATOR_VARIANT,
+    provider_id: Optional[str] = None,
+):
     """DB에서 가져온 질문들을 메모리 캐시에 복원"""
     try:
-        from datetime import datetime
-        
         # 질문 그룹 관계 생성
         question_groups = create_question_groups(questions)
         
         # 캐시에 저장할 데이터 구조 생성
         cache_data = QuestionCacheData(
+            analysis_id=analysis_id,
+            cache_key=build_question_cache_key(analysis_id, selector_variant, generator_variant),
+            experiment_id=experiment_id,
+            selector_variant=selector_variant,
+            generator_variant=generator_variant,
+            provider_id=provider_id,
             original_questions=questions,  # DB에서 가져온 질문들을 원본으로 처리
             parsed_questions=questions,    # 이미 파싱된 상태로 간주
             question_groups=question_groups,
@@ -716,7 +999,7 @@ async def _restore_questions_to_cache(analysis_id: str, questions: List[Question
         )
         
         # 메모리 캐시에 저장
-        question_cache[analysis_id] = cache_data
+        _store_question_cache_entry(cache_data)
         
         print(f"[CACHE] Restored {len(questions)} questions to memory cache for analysis {analysis_id}")
         
@@ -724,7 +1007,15 @@ async def _restore_questions_to_cache(analysis_id: str, questions: List[Question
         print(f"[CACHE] Error restoring questions to cache: {e}")
 
 
-async def _save_questions_to_db(analysis_id: str, questions: List[QuestionResponse]):
+async def _save_questions_to_db(
+    analysis_id: str,
+    questions: List[QuestionResponse],
+    *,
+    selector_variant: str,
+    generator_variant: str,
+    experiment_id: str,
+    provider_id: Optional[str] = None,
+):
     """생성된 질문들을 데이터베이스에 저장"""
     try:
         with engine.connect() as conn:
@@ -741,8 +1032,8 @@ async def _save_questions_to_db(analysis_id: str, questions: List[QuestionRespon
                 conn.execute(text(
                     """
                     INSERT INTO interview_questions 
-                    (id, analysis_id, category, difficulty, question_text, expected_points, created_at)
-                    VALUES (:id, :analysis_id, :category, :difficulty, :question_text, :expected_points, :created_at)
+                    (id, analysis_id, category, difficulty, question_text, expected_points, context, created_at)
+                    VALUES (:id, :analysis_id, :category, :difficulty, :question_text, :expected_points, :context, :created_at)
                     """
                 ), {
                     "id": question.id,
@@ -751,6 +1042,14 @@ async def _save_questions_to_db(analysis_id: str, questions: List[QuestionRespon
                     "difficulty": question.difficulty,
                     "question_text": question.question,
                     "expected_points": json.dumps(question.expected_answer_points) if question.expected_answer_points else None,
+                    "context": json.dumps({
+                        "experiment": {
+                            "experiment_id": experiment_id,
+                            "selector_variant": selector_variant,
+                            "generator_variant": generator_variant,
+                            "provider_id": provider_id,
+                        }
+                    }),
                     "created_at": current_time
                 })
             

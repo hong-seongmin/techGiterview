@@ -53,15 +53,15 @@ async def start_interview(request: InterviewStartRequest, db: Session = Depends(
         if not request.question_ids:
             raise HTTPException(status_code=400, detail="질문 ID가 제공되지 않았습니다.")
         
-        # 질문 캐시에서 질문 데이터 확인 (현재 시스템은 여전히 메모리 캐시 사용)
-        from app.api.questions import question_cache
-        if request.analysis_id not in question_cache:
+        # 질문 캐시에서 질문 데이터 확인 (active variant-aware cache 사용)
+        from app.api.questions import get_question_cache_entry
+        cache_data = get_question_cache_entry(request.analysis_id)
+        if not cache_data:
             raise HTTPException(
                 status_code=400, 
                 detail="해당 분석 ID에 대한 질문이 없습니다. 먼저 질문을 생성해주세요."
             )
-        
-        cache_data = question_cache[request.analysis_id]
+
         cached_questions = cache_data.parsed_questions
         available_question_ids = {q.id for q in cached_questions}
         

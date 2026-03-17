@@ -57,6 +57,51 @@ async def test_get_repository_tree_limited_depth_fetches_only_requested_levels(m
 
 
 @pytest.mark.asyncio
+async def test_get_repository_tree_limited_depth_falls_back_to_contents_api(monkeypatch):
+    client = github_api.GitHubClient()
+
+    async def fake_get_repository_tree(owner: str, repo: str, tree_sha: str = "HEAD", recursive: bool = True):
+        raise TimeoutError()
+
+    async def fake_get_repository_contents(owner: str, repo: str, path: str = ""):
+        if not path:
+            return [
+                {"path": "packages", "name": "packages", "type": "dir", "sha": "sha-packages"},
+                {"path": "package.json", "name": "package.json", "type": "file", "size": 20, "sha": "sha-package"},
+            ]
+        if path == "packages":
+            return [
+                {"path": "packages/vite", "name": "vite", "type": "dir", "sha": "sha-vite"},
+            ]
+        if path == "packages/vite":
+            return [
+                {"path": "packages/vite/src", "name": "src", "type": "dir", "sha": "sha-src"},
+                {"path": "packages/vite/package.json", "name": "package.json", "type": "file", "size": 12, "sha": "sha-vite-package"},
+            ]
+        if path == "packages/vite/src":
+            return [
+                {"path": "packages/vite/src/node.ts", "name": "node.ts", "type": "file", "size": 30, "sha": "sha-node"},
+            ]
+        return []
+
+    monkeypatch.setattr(client, "get_repository_tree", fake_get_repository_tree)
+    monkeypatch.setattr(client, "get_repository_contents", fake_get_repository_contents)
+
+    items = await client.get_repository_tree_limited_depth("vitejs", "vite", max_depth=3)
+
+    assert [item["path"] for item in items] == [
+        "packages",
+        "package.json",
+        "packages/vite",
+        "packages/vite/src",
+        "packages/vite/package.json",
+        "packages/vite/src/node.ts",
+    ]
+    assert items[0]["type"] == "tree"
+    assert items[1]["type"] == "blob"
+
+
+@pytest.mark.asyncio
 async def test_get_all_repository_files_caches_by_analysis_id(monkeypatch):
     analysis_id = str(uuid.uuid4())
     github_api.analysis_cache[analysis_id] = github_api.AnalysisResult(

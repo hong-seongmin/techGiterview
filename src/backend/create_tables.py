@@ -6,6 +6,7 @@ SQLAlchemy 모델을 기반으로 데이터베이스 테이블 생성
 """
 
 from app.core.database import engine, Base
+import app.models  # noqa: F401
 from app.models.repository import RepositoryAnalysis, AnalyzedFile
 from app.models.interview import InterviewSession
 from app.models.user import User

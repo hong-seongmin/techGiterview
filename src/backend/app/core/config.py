@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     max_concurrent_requests: int = 10
     request_timeout_seconds: int = 30
     cache_ttl_seconds: int = 3600
+    file_selector_display_variant: str = "selector_v2"
+    file_selector_shadow_enabled: bool = True
+    file_selector_canary_percent: int = 0
     
     class Config:
         env_file = str(resolve_env_file_path())

@@ -9,6 +9,7 @@ import random
 import re
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
+from pathlib import Path
 
 # from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 # from langgraph.graph import StateGraph, END
@@ -60,8 +61,1132 @@ class QuestionGenerator:
             "hard": (6.0, 10.0)
         }
 
+        self.unsupported_architecture_terms = {
+            "clean architecture",
+            "microservice",
+            "microservices",
+            "grpc",
+            "rest api",
+        }
+        self.strong_question_cleanup_markers = (
+            "**근거:**",
+            "근거:",
+            "**의도:**",
+            "의도:",
+            "**추가 설명:**",
+            "추가 설명:",
+            "**참조 코드:**",
+            "참조 코드:",
+        )
+
     def _resolve_provider(self) -> Optional[AIProvider]:
         return self.preferred_provider
+
+    def _has_prompt_leakage(self, question_text: str, *, max_length: int) -> bool:
+        normalized = question_text.strip()
+        lowered = normalized.lower()
+        leakage_markers = (
+            "###",
+            "```",
+            "**질문",
+            "추가 요구사항",
+            "배경 설명",
+            "참고 파일",
+            "의존성 버전 관리",
+            "실제 코드 기반",
+            "release notes",
+            "http://",
+            "https://",
+        )
+        if any(marker in normalized or marker in lowered for marker in leakage_markers):
+            return True
+        if "\n-" in normalized or "\n1." in normalized:
+            return True
+        return len(normalized) > max_length
+
+    def _extract_path_tokens(self, text: str) -> List[str]:
+        normalized = text.lower()
+        tokens = set(
+            re.findall(
+                r"(?:[a-z0-9_.-]+/)+[a-z0-9_.-]+\.(?:json|yaml|yml|toml|tsx|ts|jsx|js|py|rs|go|md|rst)",
+                normalized,
+            )
+        )
+        for base_name in (
+            "package.json",
+            "pyproject.toml",
+            "pnpm-workspace.yaml",
+            "pnpm-workspace.yml",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "cargo.toml",
+            "go.mod",
+        ):
+            if base_name in normalized:
+                tokens.add(base_name)
+        return sorted(tokens)
+
+    def _question_has_only_allowed_paths(self, question_text: str, allowed_paths: List[str]) -> bool:
+        mentioned_tokens = self._extract_path_tokens(question_text)
+        if not mentioned_tokens:
+            return True
+        allowed_normalized = {path.lower() for path in allowed_paths if path}
+        allowed_basenames = {Path(path).name.lower() for path in allowed_paths if path}
+        for token in mentioned_tokens:
+            if "/" in token:
+                if token not in allowed_normalized:
+                    return False
+            elif token not in allowed_basenames and token not in allowed_normalized:
+                return False
+        return True
+
+    def _extract_backticked_identifiers(self, text: str) -> set[str]:
+        identifiers: set[str] = set()
+        for match in re.finditer(r"`([^`]+)`", text):
+            token = match.group(1).strip()
+            if not token or "/" in token or "." in token:
+                continue
+            identifiers.add(token.lower())
+        return identifiers
+
+    def _is_doc_file(self, file_path: str) -> bool:
+        lowered = file_path.lower()
+        name = Path(lowered).name
+        return (
+            name in {"readme.md", "contributing.md", "license", "license.txt", "security.md", "changes.rst"}
+            or lowered.endswith((".md", ".rst", ".txt"))
+        )
+
+    def _is_runtime_or_config_snippet(self, snippet: Dict[str, Any]) -> bool:
+        file_path = snippet["metadata"].get("file_path", "").lower()
+        if self._is_doc_file(file_path):
+            return False
+        if any(token in file_path for token in ("/test", "/tests/", "__tests__", ".spec.", ".test.")):
+            return False
+        return True
+
+    def _is_config_file_path(self, file_path: str) -> bool:
+        lowered = file_path.lower()
+        base_name = Path(lowered).name
+        return base_name in {
+            "package.json",
+            "pnpm-workspace.yaml",
+            "pnpm-workspace.yml",
+            "tsconfig.json",
+            "pyproject.toml",
+            "cargo.toml",
+            "go.mod",
+        } or lowered.endswith((".json", ".yaml", ".yml", ".toml"))
+
+    def _is_code_analysis_config_candidate(self, file_path: str) -> bool:
+        lowered = file_path.lower()
+        base_name = Path(lowered).name
+        return base_name in {
+            "package.json",
+            "pyproject.toml",
+            "cargo.toml",
+            "go.mod",
+            "vite.config.ts",
+            "vite.config.js",
+            "webpack.config.js",
+            "webpack.config.ts",
+        }
+
+    def _snippet_priority_score(self, snippet: Dict[str, Any]) -> float:
+        importance_scores = {"very_high": 100, "high": 80, "medium": 50, "low": 20}
+        base_score = importance_scores.get(snippet["metadata"].get("importance", "low"), 20)
+        if snippet["metadata"].get("has_real_content", False):
+            base_score += 30
+        complexity = snippet["metadata"].get("complexity", 1.0)
+        base_score += min(complexity * 2, 10)
+
+        file_path = snippet["metadata"].get("file_path", "").lower()
+        if self._is_config_file_path(file_path):
+            base_score -= 15
+            if Path(file_path).name == "package.json":
+                base_score -= 5
+        elif any(token in file_path for token in ("/src/node/", "/src/client/")):
+            base_score += 12
+        return base_score
+
+    def _render_snippet_context(self, snippets: List[Dict[str, Any]], limit: int = 2) -> str:
+        rendered: List[str] = []
+        for snippet in snippets[:limit]:
+            file_path = snippet["metadata"].get("file_path", "")
+            content_preview = (snippet.get("content") or "")[:400]
+            rendered.append(f"파일: {file_path}\n내용:\n{content_preview}")
+        return "\n\n".join(rendered)
+
+    def _get_code_analysis_files_for_question_index(
+        self,
+        snippets: List[Dict[str, Any]],
+        question_index: int,
+    ) -> List[Dict[str, Any]]:
+        eligible = [
+            snippet
+            for snippet in snippets
+            if self._is_runtime_or_config_snippet(snippet)
+            and snippet["metadata"].get("has_real_content", False)
+        ]
+        if not eligible:
+            return []
+
+        runtime_files = [
+            snippet for snippet in eligible
+            if not self._is_config_file_path(snippet["metadata"].get("file_path", ""))
+        ]
+        config_files = [
+            snippet for snippet in eligible
+            if self._is_code_analysis_config_candidate(snippet["metadata"].get("file_path", ""))
+        ]
+
+        runtime_files = sorted(runtime_files, key=self._snippet_priority_score, reverse=True)
+        config_files = sorted(config_files, key=self._snippet_priority_score, reverse=True)
+
+        if config_files and question_index == 0:
+            return [config_files[0]]
+        if runtime_files:
+            runtime_index = (question_index - 1) if config_files and question_index > 0 else question_index
+            return [runtime_files[runtime_index % len(runtime_files)]]
+        if config_files:
+            config_index = question_index % len(config_files)
+            return [config_files[config_index]]
+        return []
+
+    def _extract_grounded_tech_candidates(
+        self,
+        state: QuestionState,
+        selected_files: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        tech_scores: Dict[str, float] = {}
+        if state.analysis_data and "metadata" in state.analysis_data:
+            tech_stack_str = state.analysis_data["metadata"].get("tech_stack", "{}")
+            try:
+                tech_scores = json.loads(tech_stack_str)
+            except Exception as exc:
+                print(f"[QUESTION_GEN] tech_stack JSON 파싱 실패: {exc}")
+
+        eligible_files = [snippet for snippet in selected_files if self._is_runtime_or_config_snippet(snippet)]
+        eligible_paths = [snippet["metadata"].get("file_path", "").lower() for snippet in eligible_files]
+        if any(
+            path.startswith("lib/")
+            or "/src/node/" in path
+            or "/src/server/" in path
+            or path.endswith("package.json")
+            for path in eligible_paths
+        ):
+            tech_scores["Node.js"] = max(float(tech_scores.get("Node.js", 0.0)), 0.85)
+        if any(path.endswith((".cc", ".cpp", ".cxx", ".hpp", ".h")) for path in eligible_paths):
+            tech_scores["C++"] = max(float(tech_scores.get("C++", 0.0)), 0.35)
+        if any(path.startswith("django/") or "/django/" in path for path in eligible_paths):
+            tech_scores["Django"] = max(float(tech_scores.get("Django", 0.0)), 0.9)
+        if any(path.endswith("lib/express.js") or path == "lib/express.js" for path in eligible_paths):
+            tech_scores["Express"] = max(float(tech_scores.get("Express", 0.0)), 0.88)
+        if any(path.startswith("src/click/") or "/click/" in path for path in eligible_paths):
+            tech_scores["Click"] = max(float(tech_scores.get("Click", 0.0)), 0.88)
+        candidates: List[Dict[str, Any]] = []
+
+        def _matching_files(predicate):
+            return [snippet for snippet in eligible_files if predicate(snippet)]
+
+        def _tech_file_score(tech_name: str, snippet: Dict[str, Any]) -> float:
+            file_path = snippet["metadata"].get("file_path", "").lower()
+            score = self._snippet_priority_score(snippet)
+            if tech_name == "Node.js":
+                if "/src/node/" in file_path:
+                    score += 20
+                if "/src/server/" in file_path or file_path.startswith("lib/") or "/lib/" in file_path:
+                    score += 16
+                if Path(file_path).name == "package.json":
+                    score -= 10
+            elif tech_name == "TypeScript":
+                if file_path.endswith((".ts", ".tsx")):
+                    score += 18
+                if self._is_config_file_path(file_path):
+                    score -= 8
+                if any(token in file_path for token in ("/src/server/", "/src/client/", "/src/app/")):
+                    score += 8
+            elif tech_name == "Python":
+                if file_path.endswith(".py"):
+                    score += 18
+                if Path(file_path).name == "pyproject.toml":
+                    score += 12
+            elif tech_name == "Flask":
+                if file_path.endswith(("app.py", "views.py", "cli.py")):
+                    score += 16
+                if "flask" in file_path:
+                    score += 10
+            elif tech_name == "Django":
+                if file_path.startswith("django/") or "/django/" in file_path:
+                    score += 18
+                if file_path.endswith(("global_settings.py", "apps/config.py", "apps/registry.py")):
+                    score += 12
+            elif tech_name == "FastAPI":
+                if file_path.endswith(("applications.py", "routing.py", "dependencies/utils.py")):
+                    score += 16
+                if "fastapi" in file_path:
+                    score += 10
+            elif tech_name == "Express":
+                if file_path == "lib/express.js" or file_path.endswith(("lib/application.js", "lib/request.js", "lib/response.js")):
+                    score += 16
+                if file_path.endswith("package.json"):
+                    score += 8
+            elif tech_name == "Click":
+                if file_path.startswith("src/click/") or "/src/click/" in file_path:
+                    score += 16
+                if file_path.endswith(("core.py", "parser.py", "shell_completion.py", "termui.py")):
+                    score += 10
+                if Path(file_path).name == "pyproject.toml":
+                    score += 6
+            elif tech_name == "Jinja2":
+                if Path(file_path).name == "pyproject.toml":
+                    score += 10
+            elif tech_name == "Pydantic":
+                if file_path.endswith(("_compat/v2.py", "dependencies/utils.py", "encoders.py")):
+                    score += 16
+                if "pydantic" in (snippet.get("content") or "").lower():
+                    score += 10
+            elif tech_name == "Starlette":
+                if file_path.endswith(("applications.py", "responses.py", "routing.py")):
+                    score += 14
+                if "starlette" in (snippet.get("content") or "").lower():
+                    score += 8
+            elif tech_name == "React":
+                if any(token in file_path for token in ("/src/client/", "/src/app/")):
+                    score += 18
+                if file_path.endswith((".tsx", ".jsx")):
+                    score += 12
+                if Path(file_path).name == "package.json":
+                    score -= 8
+            elif tech_name == "JavaScript" and file_path.endswith((".js", ".jsx")):
+                score += 12
+            elif tech_name == "C++" and file_path.endswith((".cc", ".cpp", ".hpp", ".h")):
+                score += 18
+            return score
+
+        def _package_dependencies(snippet: Dict[str, Any]) -> set[str]:
+            if Path(snippet["metadata"].get("file_path", "")).name.lower() != "package.json":
+                return set()
+            try:
+                package_data = json.loads(snippet.get("content") or "{}")
+            except Exception:
+                return set()
+            dependencies = {
+                **(package_data.get("dependencies") or {}),
+                **(package_data.get("devDependencies") or {}),
+                **(package_data.get("peerDependencies") or {}),
+                **(package_data.get("optionalDependencies") or {}),
+            }
+            return {name.lower() for name in dependencies}
+
+        def _python_dependency_tokens(snippet: Dict[str, Any]) -> set[str]:
+            file_path = snippet["metadata"].get("file_path", "").lower()
+            if not file_path.endswith(("pyproject.toml", "requirements.txt", "requirements-dev.txt")):
+                return set()
+            content = snippet.get("content") or ""
+            if file_path.endswith("pyproject.toml"):
+                try:
+                    import tomllib
+                    pyproject = tomllib.loads(content)
+                except Exception:
+                    pyproject = {}
+                project = pyproject.get("project") or {}
+                poetry = ((pyproject.get("tool") or {}).get("poetry") or {})
+                tokens = set()
+                for item in project.get("dependencies") or []:
+                    if isinstance(item, str):
+                        tokens.add(re.split(r"[<>=!~\[]", item, maxsplit=1)[0].strip().lower())
+                for dep_name in (poetry.get("dependencies") or {}).keys():
+                    if dep_name.lower() != "python":
+                        tokens.add(dep_name.lower())
+                return tokens
+            tokens = set()
+            for line in content.splitlines():
+                normalized = line.strip()
+                if not normalized or normalized.startswith("#"):
+                    continue
+                tokens.add(re.split(r"[<>=!~\[]", normalized, maxsplit=1)[0].strip().lower())
+            return tokens
+
+        grounded_rules = [
+            (
+                "Node.js",
+                lambda snippet: "/src/node/" in snippet["metadata"].get("file_path", "").lower()
+                or "/src/server/" in snippet["metadata"].get("file_path", "").lower()
+                or snippet["metadata"].get("file_path", "").lower().startswith("lib/")
+                or "/lib/" in snippet["metadata"].get("file_path", "").lower()
+                or "package.json" in snippet["metadata"].get("file_path", "").lower(),
+            ),
+            (
+                "TypeScript",
+                lambda snippet: snippet["metadata"].get("language") == "typescript"
+                or snippet["metadata"].get("file_path", "").lower().endswith((".ts", ".tsx"))
+                or "typescript" in _package_dependencies(snippet),
+            ),
+            (
+                "JavaScript",
+                lambda snippet: snippet["metadata"].get("language") == "javascript"
+                or snippet["metadata"].get("file_path", "").lower().endswith((".js", ".jsx")),
+            ),
+            (
+                "React",
+                lambda snippet: "react" in _package_dependencies(snippet)
+                or bool(re.search(r"from\s+[\"']react[\"']", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Vue.js",
+                lambda snippet: "vue" in _package_dependencies(snippet)
+                or snippet["metadata"].get("file_path", "").lower().endswith(".vue")
+                or bool(re.search(r"from\s+[\"']vue[\"']", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Rust",
+                lambda snippet: snippet["metadata"].get("file_path", "").lower().endswith(".rs")
+                or snippet["metadata"].get("file_path", "").lower().endswith("cargo.toml"),
+            ),
+            (
+                "C++",
+                lambda snippet: snippet["metadata"].get("file_path", "").lower().endswith((".cc", ".cpp", ".hpp", ".h")),
+            ),
+            (
+                "Python",
+                lambda snippet: snippet["metadata"].get("language") == "python"
+                or snippet["metadata"].get("file_path", "").lower().endswith(".py")
+                or snippet["metadata"].get("file_path", "").lower().endswith("pyproject.toml")
+                or "python" in _python_dependency_tokens(snippet),
+            ),
+            (
+                "FastAPI",
+                lambda snippet: "fastapi" in _python_dependency_tokens(snippet)
+                or "/fastapi/" in snippet["metadata"].get("file_path", "").lower()
+                or bool(re.search(r"\bfrom\s+fastapi\b|\bimport\s+fastapi\b", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Django",
+                lambda snippet: snippet["metadata"].get("file_path", "").lower().startswith("django/")
+                or "/django/" in snippet["metadata"].get("file_path", "").lower()
+                or bool(re.search(r"\bfrom\s+django\b|\bimport\s+django\b", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Flask",
+                lambda snippet: "flask" in _python_dependency_tokens(snippet)
+                or "/flask/" in snippet["metadata"].get("file_path", "").lower()
+                or bool(re.search(r"\bfrom\s+flask\b|\bimport\s+flask\b", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Express",
+                lambda snippet: snippet["metadata"].get("file_path", "").lower() == "lib/express.js"
+                or "express" in _package_dependencies(snippet)
+                or bool(re.search(r"\bcreateapplication\b|\bexpress\b", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Click",
+                lambda snippet: snippet["metadata"].get("file_path", "").lower().startswith("src/click/")
+                or "click" in _python_dependency_tokens(snippet)
+                or bool(re.search(r"\bfrom\s+click\b|\bimport\s+click\b", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Jinja2",
+                lambda snippet: "jinja2" in _python_dependency_tokens(snippet)
+                or "jinja2" in (snippet.get("content") or "").lower()
+                or bool(re.search(r"\bfrom\s+jinja2\b|\bimport\s+jinja2\b", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Pydantic",
+                lambda snippet: "pydantic" in _python_dependency_tokens(snippet)
+                or bool(re.search(r"\bfrom\s+pydantic\b|\bimport\s+pydantic\b", (snippet.get("content") or "").lower())),
+            ),
+            (
+                "Starlette",
+                lambda snippet: "starlette" in _python_dependency_tokens(snippet)
+                or bool(re.search(r"\bfrom\s+starlette\b|\bimport\s+starlette\b", (snippet.get("content") or "").lower())),
+            ),
+        ]
+
+        minimum_score = {
+            "Node.js": 0.3,
+            "TypeScript": 0.3,
+            "JavaScript": 0.2,
+            "Python": 0.3,
+            "Flask": 0.2,
+            "FastAPI": 0.2,
+            "Click": 0.2,
+            "Jinja2": 0.15,
+            "Pydantic": 0.2,
+            "Starlette": 0.2,
+            "React": 0.2,
+            "Vue.js": 0.2,
+            "Rust": 0.2,
+            "C++": 0.2,
+        }
+
+        for tech_name, predicate in grounded_rules:
+            score = float(tech_scores.get(tech_name, tech_scores.get(tech_name.replace(".js", ""), 0.0)))
+            if score < minimum_score.get(tech_name, 0.2):
+                continue
+            evidence_files = sorted(
+                _matching_files(predicate),
+                key=lambda snippet: _tech_file_score(tech_name, snippet),
+                reverse=True,
+            )
+            if not evidence_files:
+                continue
+            for rank, snippet in enumerate(evidence_files[:3]):
+                candidates.append(
+                    {
+                        "tech": tech_name,
+                        "score": score,
+                        "files": [snippet],
+                        "evidence_paths": [snippet["metadata"].get("file_path", "")],
+                        "candidate_rank": rank,
+                    }
+                )
+
+        candidates.sort(
+            key=lambda item: (item["score"], -item.get("candidate_rank", 0)),
+            reverse=True,
+        )
+        return candidates
+
+    def _get_grounded_tech_capacity(self, state: QuestionState) -> int:
+        if state.code_snippets:
+            all_snippets = sorted(state.code_snippets, key=self._snippet_priority_score, reverse=True)
+            selected_files = [snippet for snippet in all_snippets if self._is_runtime_or_config_snippet(snippet)]
+        else:
+            selected_files = []
+
+        grounded_candidates = self._extract_grounded_tech_candidates(
+            state,
+            selected_files or (state.code_snippets or []),
+        )
+        unique_techs: List[str] = []
+        for candidate in grounded_candidates:
+            tech_name = candidate.get("tech", "")
+            if tech_name and tech_name not in unique_techs:
+                unique_techs.append(tech_name)
+        return len(unique_techs)
+
+    def _build_architecture_context(self, selected_files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        context = {
+            "entry_files": [],
+            "config_files": [],
+            "module_files": [],
+            "evidence_terms": set(),
+            "allowed_identifiers": set(),
+        }
+
+        for snippet in selected_files:
+            if not self._is_runtime_or_config_snippet(snippet):
+                continue
+            file_path = snippet["metadata"].get("file_path", "")
+            lowered = file_path.lower()
+            base_name = Path(lowered).name
+            content = (snippet.get("content") or "").lower()
+
+            if (
+                any(token in lowered for token in ("/src/node/", "/src/client/"))
+                and self._is_runtime_entry_like(base_name)
+            ) or base_name in {"app.py", "main.py", "server.py", "cli.py", "applications.py"}:
+                context["entry_files"].append(file_path)
+            if "/src/server/" in lowered and base_name in {"next.ts", "config.ts", "router.ts", "server.ts", "index.ts"}:
+                context["entry_files"].append(file_path)
+            if any(token in lowered for token in ("/src/client/", "/src/app/")) and (
+                self._is_runtime_entry_like(base_name) or "index" in base_name
+            ):
+                context["entry_files"].append(file_path)
+            if (
+                base_name in {"package.json", "pnpm-workspace.yaml", "pnpm-workspace.yml", "tsconfig.json", "pyproject.toml", "requirements.txt", "requirements-dev.txt"}
+                or base_name.endswith(".config.ts")
+            ):
+                context["config_files"].append(file_path)
+            if (
+                "/src/" in lowered and base_name.endswith((".ts", ".tsx", ".js", ".jsx", ".py"))
+            ) or lowered.endswith(".py") or lowered.startswith("lib/") or "/lib/" in lowered:
+                context["module_files"].append(file_path)
+
+            if "/src/node/" in lowered:
+                context["evidence_terms"].add("node-runtime")
+            if "/src/client/" in lowered:
+                context["evidence_terms"].add("client-runtime")
+            if lowered.endswith(".py"):
+                context["evidence_terms"].add("python-backend")
+            if lowered.startswith("lib/") or ("/lib/" in lowered and "/src/lib/" not in lowered):
+                context["evidence_terms"].add("js-backend")
+            if "plugin" in lowered:
+                context["evidence_terms"].add("plugin-system")
+            if "build" in lowered or "rolldown" in content:
+                context["evidence_terms"].add("build-pipeline")
+            if "preview" in lowered:
+                context["evidence_terms"].add("preview-server")
+            if "pnpm-workspace" in lowered or lowered == "package.json":
+                context["evidence_terms"].add("monorepo-workspace")
+            if base_name == "cli.py":
+                context["evidence_terms"].add("cli-runtime")
+            if any(term in content for term in ("route(", "add_url_rule", "dispatch_request", "add_api_route", "api_route", "include_router")):
+                context["evidence_terms"].add("request-routing")
+            if "appcontext" in content or lowered.endswith("/ctx.py") or lowered.endswith("ctx.py"):
+                context["evidence_terms"].add("app-context")
+            if "depends(" in content or "/dependencies/" in lowered:
+                context["evidence_terms"].add("dependency-injection")
+            if base_name in {"applications.py", "app.py", "main.py", "server.py"}:
+                context["evidence_terms"].add("app-setup")
+
+            extracted = snippet["metadata"].get("extracted_elements", {})
+            for key in ("functions", "classes", "imports"):
+                for token in extracted.get(key, [])[:10]:
+                    if isinstance(token, str) and token.strip():
+                        context["allowed_identifiers"].add(token.strip().lower())
+
+        context["entry_files"] = sorted(dict.fromkeys(context["entry_files"]))[:4]
+        context["config_files"] = sorted(dict.fromkeys(context["config_files"]))[:4]
+        context["module_files"] = sorted(dict.fromkeys(context["module_files"]))[:6]
+        context["evidence_terms"] = sorted(context["evidence_terms"])
+        context["allowed_identifiers"] = sorted(context["allowed_identifiers"])
+        return context
+
+    def _select_architecture_seed_files(self, snippets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        eligible = sorted(
+            [snippet for snippet in snippets if self._is_runtime_or_config_snippet(snippet)],
+            key=self._snippet_priority_score,
+            reverse=True,
+        )
+        backend_entry_files = [
+            snippet for snippet in eligible
+            if Path(snippet["metadata"].get("file_path", "")).name.lower() in {"app.py", "main.py", "server.py", "cli.py", "applications.py"}
+        ]
+        backend_request_files = [
+            snippet for snippet in eligible
+            if (
+                Path(snippet["metadata"].get("file_path", "")).name.lower() in {"views.py", "routing.py", "blueprints.py"}
+                or "views" in snippet["metadata"].get("file_path", "").lower()
+                or "routing" in snippet["metadata"].get("file_path", "").lower()
+            )
+        ]
+        backend_context_files = [
+            snippet for snippet in eligible
+            if Path(snippet["metadata"].get("file_path", "")).name.lower() in {"ctx.py", "globals.py"}
+        ]
+        backend_dependency_files = [
+            snippet for snippet in eligible
+            if "/dependencies/" in snippet["metadata"].get("file_path", "").lower()
+        ]
+        backend_js_runtime_files = [
+            snippet for snippet in eligible
+            if (
+                snippet["metadata"].get("file_path", "").lower().startswith("lib/")
+                or "/lib/" in snippet["metadata"].get("file_path", "").lower()
+            )
+        ]
+        server_runtime_files = [
+            snippet for snippet in eligible
+            if "/src/server/" in snippet["metadata"].get("file_path", "").lower()
+        ]
+        node_files = [snippet for snippet in eligible if "/src/node/" in snippet["metadata"].get("file_path", "").lower()]
+        client_files = [
+            snippet for snippet in eligible
+            if any(
+                token in snippet["metadata"].get("file_path", "").lower()
+                for token in ("/src/client/", "/src/app/")
+            )
+        ]
+        api_files = [snippet for snippet in eligible if "/src/api/" in snippet["metadata"].get("file_path", "").lower()]
+        config_files = [
+            snippet for snippet in eligible
+            if self._is_config_file_path(snippet["metadata"].get("file_path", ""))
+        ]
+
+        selected: List[Dict[str, Any]] = []
+        for group in (
+            backend_entry_files[:2],
+            backend_request_files[:2],
+            backend_context_files[:1],
+            backend_dependency_files[:2],
+            server_runtime_files[:2],
+            client_files[:2],
+            backend_js_runtime_files[:3],
+            node_files[:2],
+            api_files[:1],
+            config_files[:2],
+            eligible,
+        ):
+            for snippet in group:
+                if snippet not in selected:
+                    selected.append(snippet)
+                if len(selected) >= 6:
+                    return selected
+        return selected[:6]
+
+    def _is_runtime_entry_like(self, base_name: str) -> bool:
+        return base_name in {
+            "index.ts",
+            "index.js",
+            "client.ts",
+            "client.js",
+            "overlay.ts",
+            "overlay.js",
+            "preview.ts",
+            "preview.js",
+            "cli.ts",
+            "cli.js",
+        }
+
+    def _validate_tech_stack_question(
+        self,
+        question_text: str,
+        *,
+        tech: str,
+        evidence_paths: List[str],
+        evidence_files: List[Dict[str, Any]],
+    ) -> bool:
+        normalized = question_text.lower()
+        if self._has_prompt_leakage(question_text, max_length=240):
+            return False
+        if tech.lower() not in normalized and tech.replace(".js", "").lower() not in normalized:
+            return False
+        path_tokens = [Path(path).name.lower() for path in evidence_paths if path]
+        if not any(token and token in normalized for token in path_tokens):
+            return False
+        if not self._question_has_only_allowed_paths(question_text, evidence_paths):
+            return False
+
+        snippet = evidence_files[0] if evidence_files else None
+        if not snippet:
+            return True
+
+        file_path = snippet["metadata"].get("file_path", "")
+        if file_path.endswith("package.json"):
+            try:
+                package_data = json.loads(snippet.get("content") or "{}")
+            except Exception:
+                package_data = {}
+            evidence_tokens = list((package_data.get("scripts") or {}).keys())[:4]
+            evidence_tokens += list({
+                **(package_data.get("dependencies") or {}),
+                **(package_data.get("devDependencies") or {}),
+            }.keys())[:4]
+            if evidence_tokens and not any(token.lower() in normalized for token in evidence_tokens):
+                return False
+        else:
+            extracted = snippet["metadata"].get("extracted_elements", {})
+            evidence_tokens = (
+                [token.lower() for token in extracted.get("functions", [])[:3]]
+                + [token.lower() for token in extracted.get("classes", [])[:3]]
+                + [token.lower() for token in extracted.get("imports", [])[:3]]
+            )
+            if evidence_tokens and not any(token in normalized for token in evidence_tokens):
+                return False
+        return True
+
+    def _validate_code_analysis_question(
+        self,
+        question_text: str,
+        snippet: Dict[str, Any],
+    ) -> bool:
+        normalized = question_text.lower()
+        if self._has_prompt_leakage(question_text, max_length=240):
+            return False
+        file_path = snippet["metadata"].get("file_path", "")
+        base_name = Path(file_path).name.lower()
+        if base_name and base_name not in normalized:
+            return False
+        if not self._question_has_only_allowed_paths(question_text, [file_path]):
+            return False
+
+        content = (snippet.get("content") or "").lower()
+        extracted = snippet["metadata"].get("extracted_elements", {})
+
+        if file_path.endswith("package.json"):
+            try:
+                package_data = json.loads(snippet.get("content") or "{}")
+            except Exception:
+                package_data = {}
+            scripts = list((package_data.get("scripts") or {}).keys())[:5]
+            deps = list({
+                **(package_data.get("dependencies") or {}),
+                **(package_data.get("devDependencies") or {}),
+            }.keys())[:6]
+            evidence_tokens = [token.lower() for token in scripts + deps if token]
+            if evidence_tokens and not any(token in normalized for token in evidence_tokens):
+                return False
+            for banned in ("hmr", "hot module replacement", "ssr", "server-side rendering"):
+                if banned in normalized and banned not in content:
+                    return False
+            return True
+
+        evidence_tokens = (
+            [token.lower() for token in extracted.get("functions", [])[:4]]
+            + [token.lower() for token in extracted.get("classes", [])[:4]]
+            + [token.lower() for token in extracted.get("imports", [])[:4]]
+        )
+        referenced_tokens = [token.strip().lower() for token in re.findall(r"`([^`]+)`", question_text)]
+        referenced_identifiers = [
+            token
+            for token in referenced_tokens
+            if token
+            and "/" not in token
+            and "." not in token
+        ]
+        banned_identifiers = {"that", "this"}
+        if any(token in banned_identifiers for token in referenced_identifiers):
+            return False
+        if referenced_identifiers and evidence_tokens:
+            if not any(token in evidence_tokens for token in referenced_identifiers):
+                return False
+        if evidence_tokens and not any(token in normalized for token in evidence_tokens):
+            return False
+        for banned in ("hmr", "hot module replacement", "ssr", "server-side rendering", "rollup 2", "rollup 3"):
+            if banned in normalized and banned not in content:
+                return False
+        return True
+
+    def _validate_architecture_question(
+        self,
+        question_text: str,
+        architecture_context: Dict[str, Any],
+    ) -> bool:
+        normalized = question_text.lower()
+        if self._has_prompt_leakage(question_text, max_length=260):
+            return False
+        path_tokens = [
+            Path(path).name.lower()
+            for path in (
+                architecture_context.get("entry_files", [])
+                + architecture_context.get("config_files", [])
+                + architecture_context.get("module_files", [])
+            )
+        ]
+        if not any(token and token in normalized for token in path_tokens[:6]):
+            return False
+        allowed_paths = (
+            architecture_context.get("entry_files", [])
+            + architecture_context.get("config_files", [])
+            + architecture_context.get("module_files", [])
+        )
+        if not self._question_has_only_allowed_paths(question_text, allowed_paths):
+            return False
+
+        internal_labels = {
+            "node-runtime",
+            "client-runtime",
+            "build-pipeline",
+            "preview-server",
+            "monorepo-workspace",
+            "plugin-system",
+            "request-flow",
+            "context-boundary",
+            "dependency-boundary",
+            "app-setup",
+            "cli-runtime",
+        }
+        if any(label in normalized for label in internal_labels):
+            return False
+
+        allowed_identifiers = set(architecture_context.get("allowed_identifiers", []))
+        backticked_identifiers = self._extract_backticked_identifiers(question_text)
+        if backticked_identifiers and any(token not in allowed_identifiers for token in backticked_identifiers):
+            return False
+
+        evidence_terms = set(term.lower() for term in architecture_context.get("evidence_terms", []))
+        for banned in self.unsupported_architecture_terms:
+            if banned in normalized and banned not in evidence_terms:
+                return False
+        for speculative_term in ("병목", "지연", "실시간 업데이트", "파일 시스템 감시", "성능 문제"):
+            if speculative_term in question_text and speculative_term.lower() not in evidence_terms:
+                return False
+        if (
+            re.search(r"\bcli\b", normalized)
+            or "tool.poetry.scripts" in normalized
+            or "main()" in normalized
+        ) and "cli-runtime" not in evidence_terms:
+            return False
+        if ("app_context" in normalized or "app-context" in normalized or "request context" in normalized) and "app-context" not in evidence_terms:
+            return False
+        if ("depends" in normalized or "dependency injection" in normalized) and "dependency-injection" not in evidence_terms:
+            return False
+        unsupported_compat_terms = (
+            "python 2/3",
+            "python2/3",
+            "python 2",
+            "python2",
+            "python 3",
+            "python3",
+            "py2",
+            "py3",
+            "하위 호환성",
+        )
+        if any(term in normalized for term in unsupported_compat_terms) and "legacy-runtime-compat" not in evidence_terms:
+            return False
+        return True
+
+    def _build_architecture_focus_modes(
+        self,
+        architecture_context: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        entry_files = architecture_context.get("entry_files", [])
+        config_files = architecture_context.get("config_files", [])
+        module_files = architecture_context.get("module_files", [])
+
+        node_files = [path for path in entry_files + module_files if "/src/node/" in path.lower()]
+        server_files = [path for path in entry_files + module_files if "/src/server/" in path.lower()]
+        client_files = [
+            path for path in entry_files + module_files
+            if any(token in path.lower() for token in ("/src/client/", "/src/app/"))
+        ]
+        api_files = [path for path in entry_files + module_files if "/src/api/" in path.lower()]
+        build_files = [path for path in module_files if "build" in Path(path).name.lower()]
+        preview_files = [path for path in entry_files + module_files if "preview" in Path(path).name.lower()]
+        workspace_files = [
+            path for path in config_files
+            if Path(path).name.lower() in {"pnpm-workspace.yaml", "pnpm-workspace.yml", "turbo.json", "nx.json", "lerna.json"}
+        ]
+        package_files = [path for path in config_files if Path(path).name.lower() == "package.json"]
+        python_entry_files = [
+            path for path in entry_files
+            if path.lower().endswith(("app.py", "main.py", "server.py", "cli.py", "applications.py"))
+        ]
+        request_files = [
+            path for path in entry_files + module_files
+            if Path(path).name.lower() in {"app.py", "views.py", "routing.py", "applications.py", "blueprints.py"}
+            or "views" in path.lower()
+            or "routing" in path.lower()
+        ]
+        cli_files = [path for path in entry_files + module_files if Path(path).name.lower() == "cli.py"]
+        context_files = [
+            path for path in module_files
+            if Path(path).name.lower() in {"ctx.py", "globals.py"} or "context" in path.lower()
+        ]
+        backend_config_files = [
+            path for path in config_files
+            if Path(path).name.lower() in {"pyproject.toml", "requirements.txt", "requirements-dev.txt"}
+        ]
+        dependency_files = [
+            path for path in module_files
+            if "/dependencies/" in path.lower() or Path(path).name.lower() in {"utils.py", "dependencies.py"}
+        ]
+        auxiliary_backend_modules = [
+            path for path in module_files
+            if path not in request_files and path not in dependency_files
+        ]
+        backend_js_modules = [
+            path for path in module_files
+            if path.startswith("lib/") or ("/lib/" in path.lower() and "/src/lib/" not in path.lower())
+        ]
+        backend_js_network_files = [
+            path for path in backend_js_modules
+            if any(token in path.lower() for token in ("http", "net", "stream", "url", "process", "child_process", "buffer", "events"))
+        ]
+
+        if "python-backend" in architecture_context.get("evidence_terms", []):
+            focus_modes = []
+            if request_files and (
+                "request-routing" in architecture_context.get("evidence_terms", [])
+                or "app-setup" in architecture_context.get("evidence_terms", [])
+            ):
+                focus_modes.append(
+                    {
+                        "name": "request-flow",
+                        "files": request_files[:2] + python_entry_files[:1] + backend_config_files[:1],
+                        "instruction": "요청 라우팅과 앱 객체 초기화 흐름을 중심으로 질문하세요.",
+                    }
+                )
+            if cli_files and "cli-runtime" in architecture_context.get("evidence_terms", []):
+                focus_modes.append(
+                    {
+                        "name": "cli-runtime",
+                        "files": cli_files[:1] + python_entry_files[:1] + backend_config_files[:1],
+                        "instruction": "CLI 진입점과 애플리케이션 런타임이 어떻게 연결되는지 중심으로 질문하세요.",
+                    }
+                )
+            if context_files and "app-context" in architecture_context.get("evidence_terms", []):
+                focus_modes.append(
+                    {
+                        "name": "context-boundary",
+                        "files": context_files[:1] + request_files[:1] + backend_config_files[:1],
+                        "instruction": "app/request context 책임과 request 처리 경계가 어떻게 나뉘는지 중심으로 질문하세요.",
+                    }
+                )
+            if dependency_files and "dependency-injection" in architecture_context.get("evidence_terms", []):
+                focus_modes.append(
+                    {
+                        "name": "dependency-boundary",
+                        "files": dependency_files[:2] + python_entry_files[:1] + backend_config_files[:1],
+                        "instruction": "의존성 주입 유틸리티와 애플리케이션 초기화 코드의 책임 분리를 중심으로 질문하세요.",
+                    }
+                )
+            if python_entry_files and "app-setup" in architecture_context.get("evidence_terms", []):
+                focus_modes.append(
+                    {
+                        "name": "app-setup",
+                        "files": python_entry_files[:1] + auxiliary_backend_modules[:1] + backend_config_files[:1],
+                        "instruction": "앱 객체 초기화와 핵심 라우팅 모듈이 어떻게 연결되는지 중심으로 질문하세요.",
+                    }
+                )
+            if not focus_modes:
+                focus_modes.extend(
+                    [
+                        {
+                            "name": "framework-core",
+                            "files": module_files[:2] + backend_config_files[:1],
+                            "instruction": "프레임워크 핵심 모듈이 어떤 역할로 나뉘고 서로 어떻게 연결되는지 중심으로 질문하세요.",
+                        },
+                        {
+                            "name": "config-boundary",
+                            "files": backend_config_files[:1] + module_files[:2],
+                            "instruction": "핵심 설정 파일과 프레임워크 내부 모듈의 책임 경계가 어떻게 나뉘는지 중심으로 질문하세요.",
+                        },
+                        {
+                            "name": "module-boundary",
+                            "files": module_files[:3],
+                            "instruction": "핵심 내부 모듈 사이의 책임 경계와 결합 방식을 중심으로 질문하세요.",
+                        },
+                    ]
+                )
+        elif "js-backend" in architecture_context.get("evidence_terms", []) and backend_js_modules:
+            runtime_entry_files = [
+                path for path in backend_js_modules
+                if Path(path).name.lower() in {"index.js", "main.js", "server.js", "node.js"}
+            ]
+            js_backend_config_files = [
+                path for path in config_files
+                if Path(path).name.lower() in {"package.json", "node.gyp"}
+            ]
+            focus_modes = [
+                {
+                    "name": "runtime-core",
+                    "files": runtime_entry_files[:1] + backend_js_modules[:2] + js_backend_config_files[:1],
+                    "instruction": "런타임 핵심 모듈과 초기화 책임 분리를 중심으로 질문하세요.",
+                },
+                {
+                    "name": "module-boundary",
+                    "files": backend_js_network_files[:2] + backend_js_modules[:1] + js_backend_config_files[:1],
+                    "instruction": "핵심 내부 모듈 사이의 책임 경계와 결합 방식을 중심으로 질문하세요.",
+                },
+                {
+                    "name": "runtime-dependency",
+                    "files": backend_js_modules[:2] + config_files[:1],
+                    "instruction": "런타임 모듈과 공통 설정 또는 유틸리티가 어떻게 연결되는지 중심으로 질문하세요.",
+                },
+            ]
+        else:
+            focus_modes = [
+                {
+                    "name": "runtime-boundary",
+                    "files": node_files[:1] + server_files[:1] + client_files[:1] + package_files[:1] + api_files[:1],
+                    "instruction": "server/runtime과 client/runtime 사이의 책임 분리와 호출 경계를 중심으로 질문하세요.",
+                },
+                {
+                    "name": "build-preview",
+                    "files": build_files[:1] + preview_files[:1] + node_files[:1] + server_files[:1] + package_files[:1] + workspace_files[:1],
+                    "instruction": "build 파이프라인과 preview 서버 흐름의 연결 방식과 트레이드오프를 중심으로 질문하세요.",
+                },
+                {
+                    "name": "workspace-boundary",
+                    "files": workspace_files[:1] + package_files[:1] + node_files[:1] + server_files[:1] + client_files[:1] + api_files[:1],
+                    "instruction": "workspace 설정과 패키지 경계가 런타임 모듈 구조에 미치는 영향을 중심으로 질문하세요.",
+                },
+            ]
+
+        normalized_modes: List[Dict[str, Any]] = []
+        seen_signatures: set[tuple[str, tuple[str, ...]]] = set()
+        for mode in focus_modes:
+            normalized_files = list(dict.fromkeys(path for path in mode["files"] if path))[:4]
+            if not normalized_files:
+                normalized_files = list(dict.fromkeys(
+                    architecture_context.get("entry_files", [])[:2]
+                    + architecture_context.get("config_files", [])[:1]
+                    + architecture_context.get("module_files", [])[:1]
+                ))[:4]
+            signature = (mode["name"], tuple(normalized_files))
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            normalized_modes.append(
+                {
+                    "name": mode["name"],
+                    "files": normalized_files,
+                    "instruction": mode["instruction"],
+                }
+            )
+
+        return normalized_modes
+
+    def _select_architecture_focus(
+        self,
+        architecture_context: Dict[str, Any],
+        question_index: int,
+    ) -> Dict[str, Any]:
+        focus_modes = self._build_architecture_focus_modes(architecture_context)
+        selected = dict(focus_modes[question_index % len(focus_modes)])
+        return selected
+
+    def _fallback_tech_stack_question(self, tech: str, evidence_paths: List[str]) -> str:
+        evidence_label = ", ".join(evidence_paths[:2]) or "선택된 핵심 파일"
+        return f"{evidence_label}에서 드러나는 {tech} 사용 방식과, 이 기술을 현재 구조에 선택한 이유를 설명해주세요."
+
+    def _fallback_architecture_question(self, architecture_context: Dict[str, Any]) -> str:
+        focus_name = architecture_context.get("focus_name", "runtime-boundary")
+        focus_files = architecture_context.get("focus_files", [])
+        entry_files = architecture_context.get("entry_files", [])
+        config_files = architecture_context.get("config_files", [])
+        module_files = architecture_context.get("module_files", [])
+        files = list(dict.fromkeys(focus_files[:4])) if focus_files else list(
+            dict.fromkeys(entry_files[:2] + config_files[:1] + module_files[:2])
+        )
+        file_label = ", ".join(files[:4]) if files else "선택된 핵심 파일들"
+        if focus_name == "build-preview":
+            return f"{file_label} 기준으로 이 저장소의 build 파이프라인과 preview 흐름이 어떻게 연결되고 분리되는지 설명해주세요."
+        if focus_name == "workspace-boundary":
+            return f"{file_label} 기준으로 workspace 설정과 패키지 경계가 런타임 모듈 구조에 어떤 영향을 주는지 설명해주세요."
+        if focus_name == "framework-core":
+            return f"{file_label} 기준으로 프레임워크 핵심 모듈이 어떤 역할로 나뉘고 서로 어떻게 연결되는지 설명해주세요."
+        if focus_name == "config-boundary":
+            return f"{file_label} 기준으로 핵심 설정 파일과 프레임워크 내부 모듈의 책임 경계가 어떻게 나뉘는지 설명해주세요."
+        if focus_name == "request-flow":
+            return f"{file_label} 기준으로 요청 라우팅과 앱 객체 초기화 흐름이 어떻게 나뉘는지 설명해주세요."
+        if focus_name == "cli-runtime":
+            return f"{file_label} 기준으로 CLI 진입점과 애플리케이션 런타임이 어떻게 연결되는지 설명해주세요."
+        if focus_name == "context-boundary":
+            return f"{file_label} 기준으로 app/request context 책임과 request 처리 경계가 어떻게 나뉘는지 설명해주세요."
+        if focus_name == "dependency-boundary":
+            return f"{file_label} 기준으로 의존성 주입 유틸리티와 애플리케이션 초기화 코드의 책임이 어떻게 분리되는지 설명해주세요."
+        if focus_name == "app-setup":
+            return f"{file_label} 기준으로 애플리케이션 객체 초기화와 핵심 모듈 구성이 어떻게 연결되는지 설명해주세요."
+        if focus_name == "runtime-core":
+            return f"{file_label} 기준으로 런타임 핵심 모듈과 초기화 책임이 어떻게 분리되는지 설명해주세요."
+        if focus_name == "module-boundary":
+            return f"{file_label} 기준으로 핵심 내부 모듈 사이의 책임 경계와 결합 방식이 어떻게 설계되어 있는지 설명해주세요."
+        if focus_name == "runtime-dependency":
+            return f"{file_label} 기준으로 런타임 모듈과 공통 설정 또는 유틸리티가 어떻게 연결되는지 설명해주세요."
+        return f"{file_label} 기준으로 이 저장소가 node/client/runtime 책임을 어떻게 나누고 있는지 설명해주세요."
+
+    def _is_duplicate_question(self, question: Dict[str, Any], existing_questions: List[Dict[str, Any]]) -> bool:
+        normalized = re.sub(r"\s+", " ", question.get("question", "").lower()).strip()
+        question_source_file = question.get("source_file")
+        question_file_tokens = set(re.findall(r"[a-z0-9_./-]+\.(?:ts|tsx|js|jsx|json|yaml|yml|toml|py|rs|go)", normalized))
+        question_focus = (question.get("metadata") or {}).get("focus_name")
+        for existing in existing_questions:
+            existing_normalized = re.sub(r"\s+", " ", existing.get("question", "").lower()).strip()
+            if not normalized or not existing_normalized:
+                continue
+            if normalized == existing_normalized:
+                return True
+            if question.get("type") == "code_analysis" and question_source_file and question_source_file == existing.get("source_file"):
+                return True
+            existing_file_tokens = set(re.findall(r"[a-z0-9_./-]+\.(?:ts|tsx|js|jsx|json|yaml|yml|toml|py|rs|go)", existing_normalized))
+            if (
+                question.get("type") == existing.get("type") == "architecture"
+                and question_file_tokens
+                and question_file_tokens == existing_file_tokens
+            ):
+                existing_focus = (existing.get("metadata") or {}).get("focus_name")
+                if not question_focus or not existing_focus or question_focus == existing_focus:
+                    return True
+            existing_focus = (existing.get("metadata") or {}).get("focus_name")
+            if question.get("type") == existing.get("type") == "architecture" and question_focus and question_focus == existing_focus:
+                return True
+            if question.get("type") == existing.get("type") and normalized[:120] == existing_normalized[:120]:
+                return True
+        return False
     
     async def generate_questions(
         self, 
@@ -107,7 +1232,7 @@ class QuestionGenerator:
             if analysis_data and "key_files" in analysis_data:
                 print(f"[DEBUG] key_files 개수: {len(analysis_data['key_files'])}")
                 # 분석 데이터에서 파일 정보 활용
-                for file_info in analysis_data["key_files"][:8]:  # 최대 8개로 증가
+                for file_info in analysis_data["key_files"][:12]:
                     file_path = file_info.get("path", "unknown")
                     file_content = file_info.get("content", "# File content not available")
                     
@@ -260,17 +1385,42 @@ class QuestionGenerator:
         questions = []
         questions_per_type = question_count // len(state.question_types)  # 3가지 타입이면 각 3개씩
         remaining_questions = question_count % len(state.question_types)
-        
+        requested_counts: Dict[str, int] = {}
+        for i, question_type in enumerate(state.question_types):
+            requested_counts[question_type] = questions_per_type + (1 if i < remaining_questions else 0)
+
+        if "tech_stack" in requested_counts:
+            grounded_tech_capacity = self._get_grounded_tech_capacity(state)
+            if grounded_tech_capacity < requested_counts["tech_stack"]:
+                tech_deficit = requested_counts["tech_stack"] - grounded_tech_capacity
+                requested_counts["tech_stack"] = grounded_tech_capacity
+                backfill_order = [
+                    question_type
+                    for question_type in ("code_analysis", "architecture")
+                    if question_type in requested_counts
+                ] or [
+                    question_type
+                    for question_type in state.question_types
+                    if question_type != "tech_stack"
+                ]
+                if backfill_order:
+                    for offset in range(tech_deficit):
+                        requested_counts[backfill_order[offset % len(backfill_order)]] += 1
+                print(
+                    f"[QUESTION_GEN] tech_stack grounded 후보 수({grounded_tech_capacity})에 맞춰 "
+                    f"{tech_deficit}개를 다른 타입으로 재분배합니다."
+                )
+
         print(f"[QUESTION_GEN] 질문 분배 계획:")
         print(f"[QUESTION_GEN]   - 기본 타입당: {questions_per_type}개")
         print(f"[QUESTION_GEN]   - 나머지 질문: {remaining_questions}개 (첫 번째 타입들에 추가)")
+        print(f"[QUESTION_GEN]   - 최종 타입별 배정: {requested_counts}")
         
         type_generation_results = {}
         
         # 각 타입별로 정확히 지정된 수만큼 생성
         for i, question_type in enumerate(state.question_types):
-            # 나머지 질문은 첫 번째 타입들에 1개씩 추가
-            current_count = questions_per_type + (1 if i < remaining_questions else 0)
+            current_count = requested_counts[question_type]
             
             print(f"[QUESTION_GEN] ========== {question_type} 타입 처리 시작 ==========")
             print(f"[QUESTION_GEN] 할당된 질문 개수: {current_count}개 ({questions_per_type} + {1 if i < remaining_questions else 0})")
@@ -330,16 +1480,54 @@ class QuestionGenerator:
             
             if failed_types:
                 print(f"[QUESTION_GEN] 실패한 타입들을 우선 보완: {failed_types}")
-                additional_questions = await self._generate_template_questions(state, failed_types, missing_count)
-                questions.extend(additional_questions)
-                print(f"[QUESTION_GEN] 템플릿 기반 질문 {len(additional_questions)}개 추가")
-            
+                additional_questions = await self._generate_template_questions_for_failed_types(state, failed_types, missing_count)
+                unique_additional_questions = [
+                    question for question in additional_questions
+                    if not self._is_duplicate_question(question, questions)
+                ]
+                questions.extend(unique_additional_questions)
+                print(f"[QUESTION_GEN] 템플릿 기반 질문 {len(unique_additional_questions)}개 추가")
+
+                if len(questions) < question_count:
+                    for qtype in failed_types:
+                        remaining_for_type = type_generation_results[qtype]["requested"] - len(
+                            [question for question in questions if question.get("type") == qtype]
+                        )
+                        if remaining_for_type <= 0:
+                            continue
+                        grounded_fallbacks = await self._generate_fallback_questions(
+                            state,
+                            qtype,
+                            remaining_for_type,
+                            len(questions),
+                        )
+                        unique_grounded_fallbacks = [
+                            question for question in grounded_fallbacks
+                            if not self._is_duplicate_question(question, questions)
+                        ]
+                        questions.extend(unique_grounded_fallbacks)
+                        print(f"[QUESTION_GEN] grounded fallback 질문 {len(unique_grounded_fallbacks)}개 추가 ({qtype})")
+
             # 여전히 부족하면 일반 템플릿 질문 추가
             if len(questions) < question_count:
                 remaining = question_count - len(questions)
-                general_questions = await self._generate_general_template_questions(state, remaining)
-                questions.extend(general_questions)
-                print(f"[QUESTION_GEN] 일반 템플릿 질문 {len(general_questions)}개 추가")
+                recovery_order = failed_types or [
+                    question_type for question_type in state.question_types if question_type != "tech_stack"
+                ] or state.question_types or ["architecture", "code_analysis", "tech_stack"]
+                for offset in range(remaining):
+                    qtype = recovery_order[offset % len(recovery_order)]
+                    grounded_fallbacks = await self._generate_fallback_questions(
+                        state,
+                        qtype,
+                        1,
+                        len(questions) + offset,
+                    )
+                    unique_grounded_fallbacks = [
+                        question for question in grounded_fallbacks
+                        if not self._is_duplicate_question(question, questions)
+                    ]
+                    questions.extend(unique_grounded_fallbacks)
+                print(f"[QUESTION_GEN] grounded fallback 보정 후 총 질문 수: {len(questions)}")
         
         print(f"[QUESTION_GEN] =============================================")
         
@@ -528,16 +1716,7 @@ class QuestionGenerator:
             return []
         
         # 우선순위 기준으로 정렬된 전체 파일 목록
-        def get_priority_score(snippet):
-            importance_scores = {"very_high": 100, "high": 80, "medium": 50, "low": 20}
-            base_score = importance_scores.get(snippet["metadata"].get("importance", "low"), 20)
-            if snippet["metadata"].get("has_real_content", False):
-                base_score += 30
-            complexity = snippet["metadata"].get("complexity", 1.0)
-            base_score += min(complexity * 2, 10)
-            return base_score
-        
-        all_snippets = sorted(state.code_snippets, key=get_priority_score, reverse=True)
+        all_snippets = sorted(state.code_snippets, key=self._snippet_priority_score, reverse=True)
         real_content_snippets = [s for s in all_snippets if s["metadata"].get("has_real_content", False)]
         
         if not real_content_snippets:
@@ -546,14 +1725,17 @@ class QuestionGenerator:
             return await self._generate_metadata_based_questions(state, all_snippets, count)
         
         # 질문 인덱스에 따라 다른 파일 세트 선택
-        selected_files = self._get_files_for_question_index(real_content_snippets, question_index)
+        selected_files = self._get_code_analysis_files_for_question_index(real_content_snippets, question_index)
         
         questions = []
         for snippet in selected_files[:count]:  # count만큼만 생성
             try:
                 # 기존 질문 생성 로직 사용
                 question = await self._generate_single_code_analysis_question(snippet, state)
-                if question:
+                if question and self._validate_code_analysis_question(question.get("question", ""), snippet):
+                    questions.append(question)
+                elif question:
+                    question["question"] = self._generate_fallback_code_question(snippet, state)
                     questions.append(question)
             except Exception as e:
                 print(f"[QUESTION_GEN] 코드 분석 질문 생성 실패: {e}")
@@ -563,50 +1745,82 @@ class QuestionGenerator:
     
     async def _generate_tech_stack_questions_with_files(self, state: QuestionState, count: int, question_index: int) -> List[Dict[str, Any]]:
         """파일 선택 다양성을 고려한 기술 스택 질문 생성"""
-        
-        # 기술 스택 추출
-        tech_stack = []
-        if state.analysis_data and "metadata" in state.analysis_data:
-            tech_stack_str = state.analysis_data["metadata"].get("tech_stack", "{}")
-            try:
-                tech_stack_dict = json.loads(tech_stack_str)
-                tech_stack = [tech for tech, score in tech_stack_dict.items() if score >= 0.05]
-            except Exception as e:
-                print(f"[QUESTION_GEN] tech_stack JSON 파싱 실패: {e}")
-        
-        if not tech_stack:
-            print("[QUESTION_GEN] 유효한 기술 스택이 없어서 tech_stack 질문 생성을 건너뜁니다.")
-            return []
-        
-        # 질문 인덱스에 따라 다른 파일 세트 선택
+
         if state.code_snippets:
-            all_snippets = sorted(state.code_snippets, key=lambda s: s["metadata"].get("importance", "low"), reverse=True)
-            selected_files = self._get_files_for_question_index(all_snippets, question_index)
+            all_snippets = sorted(state.code_snippets, key=self._snippet_priority_score, reverse=True)
+            selected_files = [snippet for snippet in all_snippets if self._is_runtime_or_config_snippet(snippet)]
         else:
             selected_files = []
-        
+
+        grounded_candidates = self._extract_grounded_tech_candidates(state, selected_files or (state.code_snippets or []))
+        if not grounded_candidates:
+            print("[QUESTION_GEN] 실제 파일 근거가 있는 기술 스택 후보가 없어서 tech_stack 질문 생성을 건너뜁니다.")
+            return []
+
+        grouped_candidates: Dict[str, List[Dict[str, Any]]] = {}
+        tech_order: List[str] = []
+        for candidate in grounded_candidates:
+            tech_name = candidate.get("tech", "")
+            if tech_name not in grouped_candidates:
+                grouped_candidates[tech_name] = []
+                tech_order.append(tech_name)
+            grouped_candidates[tech_name].append(candidate)
+
+        primary_candidates: List[Dict[str, Any]] = []
+        overflow_candidates: List[Dict[str, Any]] = []
+        used_primary_paths: set[str] = set()
+        for tech_name in tech_order:
+            candidates_for_tech = grouped_candidates[tech_name]
+            primary_index = 0
+            for index, candidate in enumerate(candidates_for_tech):
+                candidate_path = candidate["evidence_paths"][0] if candidate["evidence_paths"] else ""
+                if not candidate_path or candidate_path not in used_primary_paths:
+                    primary_index = index
+                    break
+            primary_candidate = candidates_for_tech[primary_index]
+            primary_candidates.append(primary_candidate)
+            primary_path = primary_candidate["evidence_paths"][0] if primary_candidate["evidence_paths"] else ""
+            if primary_path:
+                used_primary_paths.add(primary_path)
+            overflow_candidates.extend(
+                candidate
+                for index, candidate in enumerate(candidates_for_tech)
+                if index != primary_index
+            )
+        ordered_candidates = primary_candidates + overflow_candidates
+
         questions = []
-        for i in range(count):
-            tech = random.choice(tech_stack)
-            
-            # 선택된 파일들을 기반으로 기술 스택 질문 생성
-            file_context = ""
-            if selected_files:
-                file_info = []
-                for snippet in selected_files[:3]:  # 최대 3개 파일
-                    file_path = snippet["metadata"].get("file_path", "")
-                    content_preview = snippet["content"][:300]
-                    file_info.append(f"파일: {file_path}\n내용: {content_preview}...")
-                file_context = "\n\n".join(file_info)
-            
+        used_evidence_paths: set[str] = set()
+        for offset in range(count):
+            candidate = ordered_candidates[(question_index + offset) % len(ordered_candidates)]
+            if offset > 0:
+                for alt in ordered_candidates:
+                    alt_path = alt["evidence_paths"][0] if alt["evidence_paths"] else ""
+                    if alt["tech"] == candidate["tech"] and alt_path and alt_path not in used_evidence_paths:
+                        candidate = alt
+                        break
+            tech = candidate["tech"]
+            evidence_paths = candidate["evidence_paths"]
+            if evidence_paths:
+                used_evidence_paths.add(evidence_paths[0])
+            file_context = self._render_snippet_context(candidate["files"], limit=1)
+
             try:
                 question = await self._generate_single_tech_stack_question(tech, file_context, state)
-                if question:
+                if question and self._validate_tech_stack_question(
+                    question.get("question", ""),
+                    tech=tech,
+                    evidence_paths=evidence_paths,
+                    evidence_files=candidate["files"],
+                ):
+                    questions.append(question)
+                elif question:
+                    question["question"] = self._fallback_tech_stack_question(tech, evidence_paths)
                     questions.append(question)
             except Exception as e:
                 print(f"[QUESTION_GEN] 기술 스택 질문 생성 실패: {e}")
                 continue
-        
+
         return questions
     
     async def _generate_architecture_questions_with_files(self, state: QuestionState, count: int, question_index: int) -> List[Dict[str, Any]]:
@@ -616,23 +1830,92 @@ class QuestionGenerator:
             print("[QUESTION_GEN] 코드 스니펫이 없어서 아키텍처 질문 생성을 건너뜁니다.")
             return []
         
-        # 질문 인덱스에 따라 다른 파일 세트 선택
-        all_snippets = sorted(state.code_snippets, key=lambda s: s["metadata"].get("importance", "low"), reverse=True)
-        selected_files = self._get_files_for_question_index(all_snippets, question_index)
+        selected_files = self._select_architecture_seed_files(state.code_snippets)
+        architecture_context = self._build_architecture_context(selected_files)
+        if not architecture_context["entry_files"] and not architecture_context["module_files"]:
+            print("[QUESTION_GEN] 구조화된 아키텍처 근거가 부족해서 아키텍처 질문 생성을 건너뜁니다.")
+            return []
         
         questions = []
         for i in range(count):
             try:
-                # 선택된 파일들을 기반으로 아키텍처 분석
-                architecture_context = self._analyze_architecture_patterns(selected_files)
-                question = await self._generate_single_architecture_question(architecture_context, state)
+                focus = self._select_architecture_focus(architecture_context, question_index + i)
+                context_text = (
+                    f"focus: {focus['name']}\n"
+                    f"focus files: {focus['files']}\n"
+                    f"focus instruction: {focus['instruction']}\n"
+                    f"entry files: {architecture_context['entry_files']}\n"
+                    f"config files: {architecture_context['config_files']}\n"
+                    f"module files: {architecture_context['module_files']}\n"
+                    f"evidence terms: {architecture_context['evidence_terms']}"
+                )
+                question = await self._generate_single_architecture_question(context_text, state)
                 if question:
+                    if not self._validate_architecture_question(question.get("question", ""), architecture_context):
+                        question["question"] = self._fallback_architecture_question({
+                            **architecture_context,
+                            "focus_name": focus["name"],
+                            "focus_files": focus["files"],
+                        })
+                    question.setdefault("metadata", {})
+                    question["metadata"]["focus_name"] = focus["name"]
+                    question["metadata"]["focus_files"] = focus["files"]
                     questions.append(question)
             except Exception as e:
                 print(f"[QUESTION_GEN] 아키텍처 질문 생성 실패: {e}")
                 continue
-        
+
         return questions
+
+    async def _generate_architecture_shortage_fallbacks(
+        self,
+        state: QuestionState,
+        count: int,
+        question_index: int,
+        existing_questions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        architecture_context = self._build_architecture_context(state.code_snippets or [])
+        focus_modes = self._build_architecture_focus_modes(architecture_context)
+        if not focus_modes:
+            return []
+
+        used_focus_names = {
+            (question.get("metadata") or {}).get("focus_name")
+            for question in existing_questions
+            if question.get("type") == "architecture"
+        }
+        fallback_questions: List[Dict[str, Any]] = []
+
+        for offset in range(len(focus_modes)):
+            focus = focus_modes[(question_index + offset) % len(focus_modes)]
+            if focus["name"] in used_focus_names:
+                continue
+            question = {
+                "id": f"fallback_architecture_{question_index}_{offset}_{random.randint(1000, 9999)}",
+                "type": "architecture",
+                "question": self._fallback_architecture_question({
+                    **architecture_context,
+                    "focus_name": focus["name"],
+                    "focus_files": focus["files"],
+                }),
+                "difficulty": state.difficulty_level,
+                "context": "프로젝트 아키텍처 분석",
+                "time_estimate": "10-15분",
+                "generated_by": "fallback",
+                "metadata": {
+                    "focus_name": focus["name"],
+                    "focus_files": focus["files"],
+                    "is_fallback": True,
+                },
+            }
+            if self._is_duplicate_question(question, existing_questions + fallback_questions):
+                continue
+            fallback_questions.append(question)
+            used_focus_names.add(focus["name"])
+            if len(fallback_questions) >= count:
+                break
+
+        return fallback_questions
 
     async def _generate_questions_for_type(self, state: QuestionState, question_type: str, count: int) -> List[Dict[str, Any]]:
         """특정 타입의 질문 생성 - 질문 개수 보장 및 fallback 메커니즘"""
@@ -673,8 +1956,16 @@ class QuestionGenerator:
                     question_list = await self._generate_fallback_questions(state, question_type, 1, question_index)
                 
                 if question_list:
-                    questions.extend(question_list)
-                    print(f"[QUESTION_GEN] {question_type} - {i+1}번째 질문 생성 성공: {len(question_list)}개 (현재 총 {len(questions)}개)")
+                    unique_questions = [
+                        question
+                        for question in question_list
+                        if not self._is_duplicate_question(question, questions)
+                    ]
+                    if unique_questions:
+                        questions.extend(unique_questions)
+                        print(f"[QUESTION_GEN] {question_type} - {i+1}번째 질문 생성 성공: {len(unique_questions)}개 (현재 총 {len(questions)}개)")
+                    else:
+                        print(f"[QUESTION_GEN] {question_type} - {i+1}번째 질문은 중복으로 제외")
                 else:
                     error_msg = f"{question_type} - {i+1}번째 질문 생성 실패: 빈 결과 반환"
                     print(f"[QUESTION_GEN] {error_msg}")
@@ -684,8 +1975,12 @@ class QuestionGenerator:
                     print(f"[QUESTION_GEN] fallback 질문 생성 시도...")
                     fallback_questions = await self._generate_fallback_questions(state, question_type, 1, question_index)
                     if fallback_questions:
-                        questions.extend(fallback_questions)
-                        print(f"[QUESTION_GEN] fallback 질문 생성 성공: {len(fallback_questions)}개")
+                        unique_fallback_questions = [
+                            question for question in fallback_questions
+                            if not self._is_duplicate_question(question, questions)
+                        ]
+                        questions.extend(unique_fallback_questions)
+                        print(f"[QUESTION_GEN] fallback 질문 생성 성공: {len(unique_fallback_questions)}개")
                     
             except Exception as e:
                 error_msg = f"{question_type} - {i+1}번째 질문 생성 실패: {str(e)}"
@@ -697,8 +1992,12 @@ class QuestionGenerator:
                     print(f"[QUESTION_GEN] 예외 발생, fallback 질문 생성 시도...")
                     fallback_questions = await self._generate_fallback_questions(state, question_type, 1, question_index)
                     if fallback_questions:
-                        questions.extend(fallback_questions)
-                        print(f"[QUESTION_GEN] 예외 처리용 fallback 질문 생성 성공: {len(fallback_questions)}개")
+                        unique_fallback_questions = [
+                            question for question in fallback_questions
+                            if not self._is_duplicate_question(question, questions)
+                        ]
+                        questions.extend(unique_fallback_questions)
+                        print(f"[QUESTION_GEN] 예외 처리용 fallback 질문 생성 성공: {len(unique_fallback_questions)}개")
                 except Exception as fallback_error:
                     print(f"[QUESTION_GEN] fallback 질문 생성도 실패: {fallback_error}")
                     
@@ -708,11 +2007,28 @@ class QuestionGenerator:
         if len(questions) < count:
             shortage = count - len(questions)
             print(f"[QUESTION_GEN] 목표 미달: {len(questions)}/{count}개. {shortage}개 추가 생성 시도...")
-            
-            # 간단한 템플릿 기반 질문 생성으로 부족분 보완
-            template_questions = await self._generate_template_questions(state, question_type, shortage)
-            questions.extend(template_questions)
-            print(f"[QUESTION_GEN] 템플릿 기반 질문 {len(template_questions)}개 추가")
+
+            if question_type == "architecture":
+                fallback_questions = await self._generate_architecture_shortage_fallbacks(
+                    state,
+                    shortage,
+                    question_index + len(questions),
+                    questions,
+                )
+                unique_fallback_questions = [
+                    question for question in fallback_questions
+                    if not self._is_duplicate_question(question, questions)
+                ]
+                questions.extend(unique_fallback_questions)
+                print(f"[QUESTION_GEN] grounded fallback 질문 {len(unique_fallback_questions)}개 추가")
+            else:
+                template_questions = await self._generate_template_questions_for_type(state, question_type, shortage)
+                unique_template_questions = [
+                    question for question in template_questions
+                    if not self._is_duplicate_question(question, questions)
+                ]
+                questions.extend(unique_template_questions)
+                print(f"[QUESTION_GEN] 템플릿 기반 질문 {len(unique_template_questions)}개 추가")
         
         # 생성 결과 요약
         success_count = len(questions)
@@ -1227,6 +2543,7 @@ class QuestionGenerator:
 - 실제 scripts 명령어들을 직접 참조
 - 실제 버전 정보나 설정값들을 구체적으로 언급
 - "name", "version", "main" 필드의 실제 값들 활용
+- HMR, SSR, 런타임 성능 문제처럼 파일에 없는 동작은 추정하지 말 것
 
 예시: "이 package.json에서 사용된 특정 의존성 패키지들의 선택 이유와 버전 관리 전략에 대해 설명해주세요."
 
@@ -1253,6 +2570,7 @@ class QuestionGenerator:
 3. {question_focus} 관점에서 심도 있는 질문을 만드세요
 4. {state.difficulty_level} 난이도에 맞는 기술적 깊이를 유지하세요
 5. "만약", "가정", "일반적으로" 같은 추상적 표현 대신 코드의 실제 내용을 직접 언급하세요
+6. 코드에 없는 버전 차이, 성능 병목, 호환성 이슈를 임의로 추정하지 마세요
 
 반드시 실제 코드 내용을 참조한 구체적인 질문 하나만 생성해주세요:
 """
@@ -1261,10 +2579,11 @@ class QuestionGenerator:
         
         # 선택된 provider 기반 질문 생성
         try:
-            ai_response = await ai_service.generate_analysis(
-                prompt=prompt,
+            ai_response = await self._call_ai_with_retry(
+                ai_service.generate_analysis,
+                prompt,
+                max_retries=2,
                 provider=self._resolve_provider(),
-                api_keys=self.api_keys
             )
             
             # AI 응답 null 체크 및 fallback 처리
@@ -1318,9 +2637,12 @@ class QuestionGenerator:
 === 질문 생성 요구사항 ===
 위 파일 내용을 바탕으로 {tech} 기술에 대한 기술면접 질문을 생성해주세요:
 - 실제 파일에서 사용된 {tech} 관련 코드나 설정을 직접 참조
+- 질문에 실제 파일 경로나 파일명을 최소 하나 포함
 - {tech}의 특징과 장단점에 대한 심도 있는 질문
 - 실제 프로젝트 경험을 바탕으로 한 질문
 - {state.difficulty_level} 난이도에 맞는 기술적 깊이
+- 다른 기술로 주제를 바꾸지 말 것
+- 파일에 없는 런타임 동작이나 프레임워크를 추정하지 말 것
 
 구체적이고 실용적인 질문 하나만 생성해주세요:
 """
@@ -1328,10 +2650,11 @@ class QuestionGenerator:
         print(f"[QUESTION_GEN] ========== 기술 스택 질문 생성: {tech} ==========\n파일 컨텍스트 길이: {len(file_context)} 문자")
         
         try:
-            ai_response = await ai_service.generate_analysis(
+            ai_response = await self._call_ai_with_retry(
+                ai_service.generate_analysis,
                 prompt,
+                max_retries=2,
                 provider=self._resolve_provider(),
-                api_keys=self.api_keys
             )
             
             # AI 응답 null 체크 및 fallback 처리
@@ -1413,9 +2736,10 @@ class QuestionGenerator:
 
 === 질문 생성 요구사항 ===
 위 아키텍처 분석을 바탕으로 기술면접 질문을 생성해주세요:
-- 실제 프로젝트에서 사용된 아키텍처 패턴에 대한 질문
-- 설계 결정의 이유와 트레이드오프에 대한 질문
-- 확장성과 유지보수성 관점에서의 질문
+- entry/config/module files 중 실제 파일명을 최소 하나 포함
+- 실제 파일 구조에서 드러나는 책임 분리와 트레이드오프만 질문
+- 근거에 없는 패턴(Clean Architecture, microservice, gRPC, REST API)은 언급 금지
+- 병목, 지연, 확장성 한계 같은 문제를 언급할 때는 근거 파일에 직접 드러난 경우만 사용
 - {state.difficulty_level} 난이도에 맞는 심도 있는 내용
 
 한국어로 반드시 하나의 완전한 질문만 생성해주세요:
@@ -1424,10 +2748,11 @@ class QuestionGenerator:
         print(f"[QUESTION_GEN] ========== 아키텍처 질문 생성 ==========\n컨텍스트: {architecture_context}")
         
         try:
-            ai_response = await ai_service.generate_analysis(
+            ai_response = await self._call_ai_with_retry(
+                ai_service.generate_analysis,
                 prompt,
+                max_retries=2,
                 provider=self._resolve_provider(),
-                api_keys=self.api_keys
             )
             
             # AI 응답 null 체크 및 fallback 처리
@@ -1739,6 +3064,24 @@ class QuestionGenerator:
         
         if not file_content or len(file_content.strip()) < 10:
             return elements
+
+        def _dedupe(values: List[str], limit: int, banned: Optional[set[str]] = None) -> List[str]:
+            seen = set()
+            cleaned: List[str] = []
+            banned_values = {value.lower() for value in (banned or set())}
+            for raw_value in values:
+                value = (raw_value or "").strip()
+                if not value:
+                    continue
+                if value.lower() in banned_values:
+                    continue
+                if value in seen:
+                    continue
+                seen.add(value)
+                cleaned.append(value)
+                if len(cleaned) >= limit:
+                    break
+            return cleaned
         
         # 언어별 패턴 매칭
         if language in ["python"]:
@@ -1755,17 +3098,43 @@ class QuestionGenerator:
             elements["imports"] = imports[:10]
             
         elif language in ["javascript", "typescript"]:
+            stripped_content = re.sub(r"/\*[\s\S]*?\*/", " ", file_content)
+            stripped_content = re.sub(r"//.*", " ", stripped_content)
+            generic_identifiers = {
+                "that",
+                "this",
+                "receives",
+                "receive",
+                "returns",
+                "return",
+                "using",
+                "used",
+                "should",
+                "when",
+                "where",
+                "which",
+                "with",
+                "from",
+            }
+
             # 클래스 추출
-            classes = re.findall(r'class\s+(\w+)', file_content, re.IGNORECASE)
-            elements["classes"] = classes[:10]
+            classes = re.findall(r"\bclass\s+([A-Za-z_$][\\w$]*)", stripped_content, re.IGNORECASE)
+            elements["classes"] = _dedupe(classes, 10, generic_identifiers)
             
-            # 함수 추출 (function 선언과 화살표 함수)
-            functions = re.findall(r'(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s+)?\()', file_content, re.IGNORECASE)
-            elements["functions"] = [f[0] or f[1] for f in functions if f[0] or f[1]][:15]
+            # 함수 추출 (function 선언, function expression, 화살표 함수)
+            function_candidates: List[str] = []
+            function_patterns = [
+                r"\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(",
+                r"\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>",
+                r"\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?function\b",
+            ]
+            for pattern in function_patterns:
+                function_candidates.extend(re.findall(pattern, stripped_content, re.IGNORECASE))
+            elements["functions"] = _dedupe(function_candidates, 15, generic_identifiers)
             
             # import 추출
-            imports = re.findall(r'import\s+(?:\{[^}]*\}|\w+)\s+from\s+[\'"]([^\'"]+)[\'"]', file_content)
-            elements["imports"] = imports[:10]
+            imports = re.findall(r'import\s+(?:\{[^}]*\}|\w+)\s+from\s+[\'"]([^\'"]+)[\'"]', stripped_content)
+            elements["imports"] = _dedupe(imports, 10)
             
         elif language in ["java"]:
             # 클래스 추출
@@ -1879,20 +3248,43 @@ class QuestionGenerator:
         
         # 파일 유형별 기본 질문 템플맿
         if file_path.endswith("package.json"):
-            return "이 package.json 파일에서 사용된 dependencies를 보고, 주요 라이브러리들의 역할과 선택 이유를 설명해주세요."
+            try:
+                package_data = json.loads(snippet.get("content") or "{}")
+            except Exception:
+                package_data = {}
+            scripts = list((package_data.get("scripts") or {}).keys())[:2]
+            deps = list({
+                **(package_data.get("dependencies") or {}),
+                **(package_data.get("devDependencies") or {}),
+            }.keys())[:2]
+            evidence = scripts + deps
+            if evidence:
+                evidence_label = ", ".join(evidence)
+                return f"`{file_path}`에서 `{evidence_label}` 설정이 현재 빌드/개발 흐름에서 어떤 역할을 하는지 설명해주세요."
+            return f"`{file_path}`의 scripts와 dependency 구성이 현재 개발/빌드 흐름에서 어떤 역할을 하는지 설명해주세요."
         elif file_path.endswith(".py"):
             if extracted_elements.get("functions"):
                 func_name = extracted_elements["functions"][0]
+                if file_path:
+                    return f"`{file_path}`에서 `{func_name}` 함수의 주요 기능과 구현 방식을 설명해주세요."
                 return f"이 Python 코드에서 `{func_name}` 함수의 주요 기능과 구현 방식을 설명해주세요."
             else:
+                if file_path:
+                    return f"`{file_path}` 파일의 전체적인 구조와 주요 기능을 설명해주세요."
                 return "이 Python 코드의 전체적인 구조와 주요 기능을 설명해주세요."
         elif file_path.endswith((".js", ".ts", ".jsx", ".tsx")):
             if extracted_elements.get("functions"):
                 func_name = extracted_elements["functions"][0]
+                if file_path:
+                    return f"`{file_path}`에서 `{func_name}` 함수의 역할과 작동 원리를 설명해주세요."
                 return f"이 JavaScript/TypeScript 코드에서 `{func_name}` 함수의 역할과 작동 원리를 설명해주세요."
             else:
+                if file_path:
+                    return f"`{file_path}` 파일의 구조와 주요 기능을 설명해주세요."
                 return "이 JavaScript/TypeScript 코드의 구조와 주요 기능을 설명해주세요."
         else:
+            if file_path:
+                return f"`{file_path}` 파일의 실제 역할과 이 파일이 현재 프로젝트 구조에서 담당하는 책임을 설명해주세요."
             return f"이 {file_type} 코드의 주요 기능과 설계 의도를 설명해주세요."
     
     async def _generate_metadata_based_questions(self, state: QuestionState, snippets: List[Dict], count: int) -> List[Dict[str, Any]]:
@@ -2077,7 +3469,7 @@ class QuestionGenerator:
         print(f"[QUESTION_GEN] 메타데이터 기반 질문 생성 완료: {len(questions)}/{count}개")
         return questions
     
-    async def _generate_template_questions(self, state: QuestionState, question_types: List[str], count: int) -> List[Dict[str, Any]]:
+    async def _generate_template_questions_for_failed_types(self, state: QuestionState, question_types: List[str], count: int) -> List[Dict[str, Any]]:
         """실패한 질문 타입들을 위한 템플릿 기반 질문 생성"""
         
         print(f"[QUESTION_GEN] 템플릿 기반 질문 생성 시작 (타입: {question_types}, 개수: {count})")
@@ -2096,7 +3488,7 @@ class QuestionGenerator:
                 elif question_type == "tech_stack":
                     template_questions = self._get_tech_stack_templates(state, type_count)
                 elif question_type == "architecture":
-                    template_questions = self._get_architecture_templates(state, type_count)
+                    template_questions = await self._generate_template_questions_for_type(state, "architecture", type_count)
                 else:
                     template_questions = self._get_general_templates(state, question_type, type_count)
                 
@@ -2254,9 +3646,15 @@ class QuestionGenerator:
                 
                 # provider가 지정되어 있으면 해당 provider로 호출
                 if provider:
-                    result = await ai_function(prompt=prompt, provider=provider, api_keys=self.api_keys)
+                    result = await asyncio.wait_for(
+                        ai_function(prompt=prompt, provider=provider, api_keys=self.api_keys),
+                        timeout=25,
+                    )
                 else:
-                    result = await ai_function(prompt, api_keys=self.api_keys)
+                    result = await asyncio.wait_for(
+                        ai_function(prompt, api_keys=self.api_keys),
+                        timeout=25,
+                    )
                 
                 # 응답 검증
                 if result and "content" in result and result["content"].strip():
@@ -2323,7 +3721,7 @@ class QuestionGenerator:
         
         # 타입별 fallback 질문 생성
         for i in range(count):
-            question_id = f"fallback_{question_type}_{question_index}_{i}"
+            question_id = f"fallback_{question_type}_{question_index}_{i}_{random.randint(1000, 9999)}"
             
             if question_type == "code_analysis":
                 if selected_file_info:
@@ -2333,14 +3731,30 @@ class QuestionGenerator:
                     question_text = f"{repo_name}의 핵심 코드 구조와 주요 컴포넌트에 대해 설명해주세요."
                     
             elif question_type == "tech_stack":
-                if tech_stack:
+                grounded_candidates = self._extract_grounded_tech_candidates(
+                    state,
+                    state.code_snippets or [],
+                )
+                if grounded_candidates:
+                    candidate = grounded_candidates[i % len(grounded_candidates)]
+                    question_text = self._fallback_tech_stack_question(
+                        candidate["tech"],
+                        candidate["evidence_paths"],
+                    )
+                elif tech_stack:
                     tech = tech_stack[i % len(tech_stack)]
                     question_text = f"이 프로젝트에서 {tech}를 선택한 이유와 어떻게 활용했는지 설명해주세요."
                 else:
                     question_text = f"{repo_name}에서 사용한 주요 기술 스택과 그 선택 이유를 설명해주세요."
                     
             elif question_type == "architecture":
-                question_text = f"{repo_name}의 전체 아키텍처 설계 패턴과 주요 설계 결정사항에 대해 설명해주세요."
+                architecture_context = self._build_architecture_context(state.code_snippets or [])
+                focus = self._select_architecture_focus(architecture_context, question_index + i)
+                question_text = self._fallback_architecture_question({
+                    **architecture_context,
+                    "focus_name": focus["name"],
+                    "focus_files": focus["files"],
+                })
                 
             else:
                 question_text = f"{repo_name}의 {question_type} 관련하여 중요한 구현 결정사항과 그 이유를 설명해주세요."
@@ -2357,7 +3771,9 @@ class QuestionGenerator:
                 "metadata": {
                     "is_fallback": True,
                     "generation_method": "template",
-                    "question_index": question_index
+                    "question_index": question_index,
+                    "focus_name": focus["name"] if question_type == "architecture" else None,
+                    "focus_files": focus["files"] if question_type == "architecture" else None,
                 }
             }
             
@@ -2367,7 +3783,7 @@ class QuestionGenerator:
         print(f"[QUESTION_GEN] fallback 질문 {len(fallback_questions)}개 생성 완료")
         return fallback_questions
     
-    async def _generate_template_questions(self, state: QuestionState, question_type: str, count: int) -> List[Dict[str, Any]]:
+    async def _generate_template_questions_for_type(self, state: QuestionState, question_type: str, count: int) -> List[Dict[str, Any]]:
         """템플릿 기반 질문 생성 (최후 보장 메커니즘)"""
         
         print(f"[QUESTION_GEN] 템플릿 질문 생성 시작: {question_type} 타입, {count}개")
@@ -2408,12 +3824,21 @@ class QuestionGenerator:
         
         for i in range(count):
             template_index = i % len(templates)
-            question_id = f"template_{question_type}_{i}"
+            question_id = f"template_{question_type}_{i}_{random.randint(1000, 9999)}"
+            question_text = templates[template_index]
+            if question_type == "architecture" and state.code_snippets:
+                architecture_context = self._build_architecture_context(state.code_snippets)
+                focus = self._select_architecture_focus(architecture_context, i)
+                question_text = self._fallback_architecture_question({
+                    **architecture_context,
+                    "focus_name": focus["name"],
+                    "focus_files": focus["files"],
+                })
             
             template_question = {
                 "id": question_id,
                 "type": question_type,
-                "question": templates[template_index],
+                "question": question_text,
                 "difficulty": state.difficulty_level,
                 "context": "프로젝트 일반 분석",
                 "time_estimate": "5분",

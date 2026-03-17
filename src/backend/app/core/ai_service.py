@@ -389,7 +389,7 @@ class AIService:
                 raise ValueError("Google API key not available")
             
             model = genai.GenerativeModel('gemini-2.0-flash')
-            response = model.generate_content(prompt)
+            response = await asyncio.to_thread(model.generate_content, prompt)
             
             return {
                 "provider": AIProvider.GEMINI_FLASH.value,

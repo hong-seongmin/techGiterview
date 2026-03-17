@@ -5,10 +5,15 @@ GitHub API Integration Router
 """
 
 import asyncio
+import json
+import re
 import aiohttp
 import uuid
 import time
+import tomllib
+import traceback
 from collections import deque
+from pathlib import Path
 from typing import Dict, List, Any, Optional, Literal, NamedTuple
 from fastapi import APIRouter, HTTPException, Depends, Header, Response
 from pydantic import BaseModel, HttpUrl
@@ -19,6 +24,10 @@ from app.core.config import settings
 from app.services.file_importance_analyzer import SmartFileImportanceAnalyzer
 from app.services.dependency_analyzer import DependencyAnalyzer
 from app.services.analysis_graph_service import build_analysis_graph_response
+from app.services.file_selector import (
+    RemoteFileSelectorService,
+    assign_selector_variants,
+)
 from app.core.database import get_db
 from app.core.session_token import (
     TokenValidationError,
@@ -91,6 +100,42 @@ class AnalysisResult(BaseModel):
     smart_file_analysis: Optional[Dict[str, Any]] = None
 
 
+MAX_STORED_KEY_FILE_CONTENT_CHARS = 20000
+
+
+def _serialize_file_info(file_info: FileInfo) -> Dict[str, Any]:
+    payload = {
+        "path": file_info.path,
+        "type": file_info.type,
+        "size": file_info.size,
+    }
+    if file_info.content:
+        payload["content"] = file_info.content[:MAX_STORED_KEY_FILE_CONTENT_CHARS]
+        payload["content_truncated"] = len(file_info.content) > MAX_STORED_KEY_FILE_CONTENT_CHARS
+    return payload
+
+
+def _build_analysis_metadata(
+    *,
+    selected_provider_id: Optional[str],
+    summary: str,
+    recommendations: List[str],
+    smart_file_analysis: Optional[Dict[str, Any]],
+    key_files: List[FileInfo],
+    complexity_score: float,
+) -> Dict[str, Any]:
+    selector_experiment = (smart_file_analysis or {}).get("selector_experiment", {})
+    return {
+        "selected_provider_id": selected_provider_id,
+        "summary": summary,
+        "recommendations": recommendations,
+        "smart_file_analysis": smart_file_analysis,
+        "selected_key_files": [_serialize_file_info(file_info) for file_info in key_files],
+        "complexity_score": complexity_score,
+        "selector_experiment": selector_experiment,
+    }
+
+
 class GraphNode(BaseModel):
     id: str
     name: str
@@ -119,11 +164,17 @@ class LoadedAnalysis(NamedTuple):
     source: Literal["cache", "db"]
 
 
+def _extract_analysis_metadata(analysis_db: Any) -> Dict[str, Any]:
+    metadata = analysis_db.analysis_metadata or {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
 class GitHubClient:
     """실제 GitHub API 클라이언트"""
     
     def __init__(self):
         self.base_url = "https://api.github.com"
+        self.timeout = aiohttp.ClientTimeout(total=60, connect=10, sock_read=30)
         self.headers = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "TechGiterview/1.0"
@@ -135,7 +186,7 @@ class GitHubClient:
         """저장소 기본 정보 조회"""
         url = f"{self.base_url}/repos/{owner}/{repo}"
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
             async with session.get(url, headers=self.headers) as response:
                 if response.status == 404:
                     raise HTTPException(status_code=404, detail="Repository not found")
@@ -148,8 +199,14 @@ class GitHubClient:
         """저장소 내용 조회"""
         url = f"{self.base_url}/repos/{owner}/{repo}/contents/{path}"
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self.headers) as response:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            try:
+                response = await asyncio.wait_for(session.get(url, headers=self.headers), timeout=12)
+            except asyncio.TimeoutError:
+                print(f"[GITHUB_API] get_repository_contents timeout: {owner}/{repo} path={path}")
+                return []
+
+            async with response:
                 if response.status != 200:
                     return []
                 return await response.json()
@@ -158,8 +215,14 @@ class GitHubClient:
         """파일 내용 조회"""
         url = f"{self.base_url}/repos/{owner}/{repo}/contents/{path}"
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self.headers) as response:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            try:
+                response = await asyncio.wait_for(session.get(url, headers=self.headers), timeout=12)
+            except asyncio.TimeoutError:
+                print(f"[GITHUB_API] get_file_content timeout: {owner}/{repo} path={path}")
+                return None
+
+            async with response:
                 if response.status != 200:
                     return None
                 
@@ -173,7 +236,7 @@ class GitHubClient:
         """저장소 사용 언어 조회"""
         url = f"{self.base_url}/repos/{owner}/{repo}/languages"
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
             async with session.get(url, headers=self.headers) as response:
                 if response.status != 200:
                     return {}
@@ -185,7 +248,7 @@ class GitHubClient:
         if recursive:
             url += "?recursive=1"
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
             async with session.get(url, headers=self.headers) as response:
                 if response.status != 200:
                     raise HTTPException(status_code=response.status, detail=f"Tree API error: {response.status}")
@@ -239,23 +302,68 @@ class GitHubClient:
         visited_shas = set()
         items: List[Dict[str, Any]] = []
 
-        while queue:
-            parent_path, tree_sha = queue.popleft()
-            if tree_sha in visited_shas:
-                continue
-            visited_shas.add(tree_sha)
+        try:
+            while queue:
+                parent_path, tree_sha = queue.popleft()
+                if tree_sha in visited_shas:
+                    continue
+                visited_shas.add(tree_sha)
 
-            tree_data = await self.get_repository_tree(owner, repo, tree_sha, recursive=False)
+                tree_data = await asyncio.wait_for(
+                    self.get_repository_tree(owner, repo, tree_sha, recursive=False),
+                    timeout=20,
+                )
 
-            for node in tree_data.get("tree", []):
-                full_path = node["path"] if not parent_path else f"{parent_path}/{node['path']}"
-                item = {**node, "path": full_path}
-                items.append(item)
+                for node in tree_data.get("tree", []):
+                    full_path = node["path"] if not parent_path else f"{parent_path}/{node['path']}"
+                    item = {**node, "path": full_path}
+                    items.append(item)
 
-                if node["type"] == "tree" and full_path.count("/") < max_depth:
-                    queue.append((full_path, node["sha"]))
+                    if node["type"] == "tree" and full_path.count("/") < max_depth:
+                        queue.append((full_path, node["sha"]))
+        except Exception as exc:
+            error_text = str(exc).strip() or repr(exc)
+            print(f"[TREE_API] Tree API fallback triggered for {owner}/{repo}: {type(exc).__name__}: {error_text}")
+            return await self.get_repository_tree_limited_depth_via_contents(owner, repo, max_depth)
 
         print(f"[TREE_API] Limited-depth tree fetched: {len(items)} items")
+        return items
+
+    async def get_repository_tree_limited_depth_via_contents(
+        self,
+        owner: str,
+        repo: str,
+        max_depth: int,
+    ) -> List[Dict[str, Any]]:
+        """Contents API로 깊이 제한 트리 구성 (Tree API timeout/실패 fallback)"""
+        print(f"[TREE_API] Using Contents API fallback for {owner}/{repo} (max_depth={max_depth})")
+        queue = deque([("", 0)])
+        items: List[Dict[str, Any]] = []
+
+        while queue:
+            current_path, current_depth = queue.popleft()
+            if current_depth > max_depth:
+                continue
+
+            contents = await self.get_repository_contents(owner, repo, current_path)
+            for node in contents:
+                node_type = node.get("type")
+                if node_type not in {"file", "dir"}:
+                    continue
+
+                items.append(
+                    {
+                        "path": node["path"],
+                        "type": "blob" if node_type == "file" else "tree",
+                        "size": node.get("size"),
+                        "sha": node.get("sha"),
+                    }
+                )
+
+                if node_type == "dir" and current_depth < max_depth:
+                    queue.append((node["path"], current_depth + 1))
+
+        print(f"[TREE_API] Contents API fallback fetched: {len(items)} items")
         return items
 
 
@@ -310,46 +418,130 @@ class RepositoryAnalyzer:
     
     def analyze_tech_stack(self, key_files: List[FileInfo], languages: Dict[str, int]) -> Dict[str, float]:
         """기술 스택 분석"""
-        tech_scores = {}
+        tech_scores: Dict[str, float] = {}
         total_bytes = sum(languages.values()) if languages else 1
-        
-        # 언어별 비율 계산
-        for lang, bytes_count in languages.items():
+
+        def record_score(tech: str, score: float) -> None:
+            if score <= 0:
+                return
+            tech_scores[tech] = max(tech_scores.get(tech, 0.0), round(min(score, 1.0), 3))
+
+        sorted_languages = sorted(languages.items(), key=lambda item: item[1], reverse=True)
+        for index, (lang, bytes_count) in enumerate(sorted_languages):
             percentage = bytes_count / total_bytes
-            tech_scores[lang] = round(percentage, 3)
-        
-        # 파일 기반 기술 스택 검출
+            if percentage >= 0.08 or index == 0:
+                record_score(lang, percentage)
+
+        file_paths = [file_info.path.lower() for file_info in key_files]
+        base_names = [Path(path).name.lower() for path in file_paths]
+        package_dependency_tokens: set[str] = set()
+        python_dependency_tokens: set[str] = set()
+
         try:
-            file_names = [f.path.split('/')[-1] for f in key_files]
-            file_contents = {f.path: f.content for f in key_files if f.content}
-            
-            for tech, patterns in self.tech_stack_patterns.items():
-                score = 0
-                for pattern in patterns:
-                    # 파일명 검사
-                    if any(pattern.lower() in file_name.lower() for file_name in file_names):
-                        score += 0.1
-                    
-                    # 파일 내용 검사
-                    for file_path, content in file_contents.items():
-                        if content and pattern.lower() in content.lower():
-                            score += 0.1
-                    
-                    # package.json 특별 처리
-                    if pattern == "package.json":
-                        package_file = next((f for f in key_files if f.path.endswith("package.json")), None)
-                        if package_file and package_file.content:
-                            for other_pattern in patterns[1:]:  # 첫 번째는 파일명이므로 제외
-                                if other_pattern.lower() in package_file.content.lower():
-                                    score += 0.2
-                
-                if score > 0:
-                    tech_scores[tech] = min(score, 1.0)
-        
+            for file_info in key_files:
+                file_path = file_info.path.lower()
+                base_name = Path(file_path).name.lower()
+                content = file_info.content or ""
+                lowered_content = content.lower()
+
+                if base_name == "package.json" and content:
+                    try:
+                        package_json = json.loads(content)
+                    except Exception:
+                        package_json = {}
+                    dependencies = {
+                        **(package_json.get("dependencies") or {}),
+                        **(package_json.get("devDependencies") or {}),
+                        **(package_json.get("peerDependencies") or {}),
+                        **(package_json.get("optionalDependencies") or {}),
+                    }
+                    package_dependency_tokens.update(name.lower() for name in dependencies)
+                    record_score("Node.js", 1.0)
+                    if "typescript" in package_dependency_tokens or any(name == "tsconfig.json" for name in base_names):
+                        record_score("TypeScript", 1.0)
+                    if "react" in package_dependency_tokens:
+                        record_score("React", 0.9)
+                    if "vue" in package_dependency_tokens or "vue-router" in package_dependency_tokens:
+                        record_score("Vue.js", 0.9)
+                    if any(token.startswith("@angular/") for token in package_dependency_tokens):
+                        record_score("Angular", 0.9)
+                    if "vite" in package_dependency_tokens:
+                        record_score("Node.js", 1.0)
+
+                elif base_name in {"pyproject.toml", "requirements.txt", "requirements-dev.txt", "setup.py"} and content:
+                    if base_name == "pyproject.toml":
+                        try:
+                            pyproject = tomllib.loads(content)
+                        except Exception:
+                            pyproject = {}
+                        project = pyproject.get("project") or {}
+                        project_dependencies = project.get("dependencies") or []
+                        dependency_groups = project.get("optional-dependencies") or {}
+                        poetry = ((pyproject.get("tool") or {}).get("poetry") or {})
+                        poetry_dependencies = poetry.get("dependencies") or {}
+                        python_dependency_tokens.update(
+                            dep_name.lower()
+                            for dep_name in poetry_dependencies.keys()
+                            if dep_name.lower() != "python"
+                        )
+                        for item in project_dependencies:
+                            if isinstance(item, str):
+                                python_dependency_tokens.add(re.split(r"[<>=!~\[]", item, maxsplit=1)[0].strip().lower())
+                        for deps in dependency_groups.values():
+                            for item in deps:
+                                if isinstance(item, str):
+                                    python_dependency_tokens.add(re.split(r"[<>=!~\[]", item, maxsplit=1)[0].strip().lower())
+                    else:
+                        for line in content.splitlines():
+                            normalized = line.strip()
+                            if not normalized or normalized.startswith("#"):
+                                continue
+                            python_dependency_tokens.add(re.split(r"[<>=!~\[]", normalized, maxsplit=1)[0].strip().lower())
+
+                if file_path.endswith(".rs") or base_name == "cargo.toml":
+                    record_score("Rust", 1.0)
+                if file_path.endswith(".cs") or base_name.endswith((".csproj", ".sln")):
+                    record_score("C#", 0.9)
+                if file_path.endswith(".go") or base_name == "go.mod":
+                    record_score("Go", 0.9)
+
+                if "/flask/" in file_path or re.search(r"\bfrom\s+flask\b|\bimport\s+flask\b", lowered_content):
+                    record_score("Flask", 1.0)
+                if "/fastapi/" in file_path or re.search(r"\bfrom\s+fastapi\b|\bimport\s+fastapi\b", lowered_content):
+                    record_score("FastAPI", 1.0)
+                if re.search(r"\bfrom\s+jinja2\b|\bimport\s+jinja2\b", lowered_content):
+                    record_score("Jinja2", 0.75)
+                if re.search(r"\bfrom\s+pydantic\b|\bimport\s+pydantic\b", lowered_content):
+                    record_score("Pydantic", 0.95)
+                if re.search(r"\bfrom\s+starlette\b|\bimport\s+starlette\b", lowered_content):
+                    record_score("Starlette", 0.9)
+                if re.search(r"from\s+react\b|from\s+[\"']react[\"']", lowered_content):
+                    record_score("React", 0.8)
+                if re.search(r"from\s+[\"']vue[\"']|createapp\(|definecomponent\(", lowered_content):
+                    record_score("Vue.js", 0.8)
+
+            if "fastapi" in python_dependency_tokens:
+                record_score("FastAPI", 1.0)
+            if "flask" in python_dependency_tokens:
+                record_score("Flask", 1.0)
+            if "jinja2" in python_dependency_tokens:
+                record_score("Jinja2", 0.45)
+            if "pydantic" in python_dependency_tokens:
+                record_score("Pydantic", 0.95)
+            if "starlette" in python_dependency_tokens:
+                record_score("Starlette", 0.9)
+            if any(name in python_dependency_tokens for name in {"django", "django-stubs"}):
+                record_score("Django", 0.9)
+
         except Exception as e:
             print(f"Tech stack analysis error: {e}")
-        
-        return tech_scores
+
+        primary_language_names = {sorted_languages[0][0]} if sorted_languages else set()
+        return {
+            tech: score
+            for tech, score in tech_scores.items()
+            if score >= 0.08 or tech in primary_language_names
+        }
     
     async def get_key_files(self, owner: str, repo: str) -> List[FileInfo]:
         """SmartFileImportanceAnalyzer를 사용한 고급 파일 선택"""
@@ -823,6 +1015,77 @@ class RepositoryAnalyzer:
         return round(sum(complexity_factors) / len(complexity_factors), 2)
 
 
+def _save_analysis_record(
+    db: Session,
+    *,
+    analysis_id: str,
+    repo_url: str,
+    repo_info: RepositoryInfo,
+    tech_stack: Dict[str, float],
+    key_files: List[FileInfo],
+    complexity_score: float,
+    analysis_metadata: Dict[str, Any],
+) -> None:
+    from app.models.repository import RepositoryAnalysis
+
+    analysis_row = db.query(RepositoryAnalysis).filter(
+        func.cast(RepositoryAnalysis.id, String) == analysis_id
+    ).first()
+
+    if analysis_row is None:
+        analysis_row = RepositoryAnalysis(
+            id=uuid.UUID(analysis_id),
+            repository_url=repo_url,
+            repository_name=repo_info.name,
+            primary_language=repo_info.language,
+            tech_stack=tech_stack,
+            file_count=len(key_files),
+            complexity_score=complexity_score,
+            analysis_metadata=analysis_metadata,
+            status="completed",
+            completed_at=datetime.utcnow(),
+        )
+        db.add(analysis_row)
+    else:
+        analysis_row.repository_url = repo_url
+        analysis_row.repository_name = repo_info.name
+        analysis_row.primary_language = repo_info.language
+        analysis_row.tech_stack = tech_stack
+        analysis_row.file_count = len(key_files)
+        analysis_row.complexity_score = complexity_score
+        analysis_row.analysis_metadata = analysis_metadata
+        analysis_row.status = "completed"
+        analysis_row.completed_at = datetime.utcnow()
+
+    db.flush()
+
+
+def _save_file_selection_runs(
+    db: Session,
+    *,
+    analysis_id: str,
+    experiment_id: str,
+    runs: List[Dict[str, Any]],
+) -> None:
+    from app.models.repository import FileSelectionRun
+
+    for run in runs:
+        db.add(
+            FileSelectionRun(
+                analysis_id=uuid.UUID(analysis_id),
+                experiment_id=experiment_id,
+                variant=run["variant"],
+                is_shadow=1 if run.get("is_shadow") else 0,
+                selected_file_count=run.get("selected_file_count", 0),
+                latency_ms=run.get("latency_ms"),
+                selected_files=run.get("selected_files", []),
+                run_metadata=run.get("metadata", {}),
+            )
+        )
+
+    db.flush()
+
+
 @router.post("/analyze", response_model=AnalysisResult)
 async def analyze_repository(
     request: RepositoryAnalysisRequest,
@@ -1113,6 +1376,7 @@ async def _load_analysis_result_internal(analysis_id: str, db: Session) -> Loade
         if not analysis_db:
             raise HTTPException(status_code=404, detail="Analysis not found")
 
+        metadata = _extract_analysis_metadata(analysis_db)
         repo_url_parts = analysis_db.repository_url.replace("https://github.com/", "").split("/")
         owner = repo_url_parts[0] if len(repo_url_parts) > 0 else "Unknown"
         repo_name = repo_url_parts[1] if len(repo_url_parts) > 1 else "Unknown"
@@ -1129,20 +1393,34 @@ async def _load_analysis_result_internal(analysis_id: str, db: Session) -> Loade
             default_branch="main"
         )
 
+        key_files = [
+            FileInfo(
+                path=file_info.get("path", ""),
+                type=file_info.get("type", "file"),
+                size=file_info.get("size", 0),
+                content=file_info.get("content"),
+            )
+            for file_info in metadata.get("selected_key_files", [])
+        ]
+
         analysis_result = AnalysisResult(
             success=True,
             analysis_id=str(analysis_db.id),
-            selected_provider_id=(analysis_db.analysis_metadata or {}).get("selected_provider_id"),
+            selected_provider_id=metadata.get("selected_provider_id"),
             repo_info=repo_info,
             tech_stack=analysis_db.tech_stack if analysis_db.tech_stack else {},
-            key_files=[],
-            summary=f"{repo_name} 저장소 분석 결과",
-            recommendations=[
-                "테스트 코드를 추가하여 코드 품질을 향상시키세요.",
-                "Docker를 사용하여 배포 환경을 표준화하는 것을 고려해보세요.",
-                "GitHub Actions을 사용하여 CI/CD 파이프라인을 구축해보세요."
-            ],
-            created_at=analysis_db.created_at
+            key_files=key_files,
+            summary=metadata.get("summary", f"{repo_name} 저장소 분석 결과"),
+            recommendations=metadata.get(
+                "recommendations",
+                [
+                    "테스트 코드를 추가하여 코드 품질을 향상시키세요.",
+                    "Docker를 사용하여 배포 환경을 표준화하는 것을 고려해보세요.",
+                    "GitHub Actions을 사용하여 CI/CD 파이프라인을 구축해보세요.",
+                ],
+            ),
+            created_at=analysis_db.created_at,
+            smart_file_analysis=metadata.get("smart_file_analysis"),
         )
 
         analysis_cache[analysis_id] = analysis_result
@@ -1401,7 +1679,11 @@ async def test_github_connection():
 
 
 @router.post("/analyze-simple", response_model=AnalysisResult)
-async def analyze_repository_simple(request: RepositoryAnalysisRequest, response: Response):
+async def analyze_repository_simple(
+    request: RepositoryAnalysisRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     """간단한 저장소 분석 - 캐시 저장 포함"""
     try:
         # URL 유효성 검증
@@ -1424,6 +1706,13 @@ async def analyze_repository_simple(request: RepositoryAnalysisRequest, response
         # 실제 GitHub API를 사용한 분석
         github_client = GitHubClient()
         repo_analyzer = RepositoryAnalyzer()
+        selector_assignment = assign_selector_variants(
+            analysis_id,
+            display_variant_override=settings.file_selector_display_variant,
+            shadow_enabled=settings.file_selector_shadow_enabled,
+            canary_percent=settings.file_selector_canary_percent,
+        )
+        selector_service = RemoteFileSelectorService(github_client)
         
         # 1. 저장소 기본 정보 수집
         repo_info_dict = await github_client.get_repository_info(owner, repo_name)
@@ -1443,9 +1732,77 @@ async def analyze_repository_simple(request: RepositoryAnalysisRequest, response
             default_branch=repo_info_dict.get("default_branch", "main")
         )
         
-        # 2. 중요 파일 수집 (최소 6개 이상 확보)
-        key_files = await repo_analyzer.get_key_files(owner, repo_name)
-        print(f"[ANALYZE_SIMPLE] 중요 파일 {len(key_files)}개 수집")
+        # 2. 중요 파일 수집 (display variant + optional shadow variant)
+        selector_runs: List[Dict[str, Any]] = []
+        if selector_assignment.display_variant == "selector_v2":
+            display_selection = await selector_service.select_v2(owner, repo_name)
+        else:
+            legacy_key_files = await repo_analyzer.get_key_files(owner, repo_name)
+            display_selection = selector_service.wrap_legacy_result(
+                legacy_key_files,
+                variant=selector_assignment.display_variant,
+            )
+
+        selector_runs.append(
+            {
+                "variant": display_selection.variant,
+                "is_shadow": False,
+                    "selected_file_count": len(display_selection.key_files),
+                    "latency_ms": display_selection.latency_ms,
+                    "selected_files": [
+                        {
+                            "path": file_info.get("path") or file_info.get("file_path"),
+                            "importance_score": file_info.get("importance_score", 0),
+                            "rank": file_info.get("rank"),
+                        }
+                        for file_info in display_selection.smart_file_analysis.get("critical_files", [])
+                    ],
+                "metadata": display_selection.smart_file_analysis,
+            }
+        )
+
+        shadow_selection = None
+        if selector_assignment.shadow_variant == "selector_v2":
+            shadow_selection = await selector_service.select_v2(owner, repo_name)
+        elif selector_assignment.shadow_variant == "selector_v1":
+            legacy_shadow_files = await repo_analyzer.get_key_files(owner, repo_name)
+            shadow_selection = selector_service.wrap_legacy_result(
+                legacy_shadow_files,
+                variant=selector_assignment.shadow_variant,
+            )
+
+        if shadow_selection is not None:
+            selector_runs.append(
+                {
+                    "variant": shadow_selection.variant,
+                    "is_shadow": True,
+                        "selected_file_count": len(shadow_selection.key_files),
+                        "latency_ms": shadow_selection.latency_ms,
+                        "selected_files": [
+                            {
+                                "path": file_info.get("path") or file_info.get("file_path"),
+                                "importance_score": file_info.get("importance_score", 0),
+                                "rank": file_info.get("rank"),
+                            }
+                            for file_info in shadow_selection.smart_file_analysis.get("critical_files", [])
+                        ],
+                    "metadata": shadow_selection.smart_file_analysis,
+                }
+            )
+
+        key_files = [
+            FileInfo(
+                path=file_info["path"],
+                type=file_info["type"],
+                size=file_info["size"],
+                content=file_info.get("content"),
+            )
+            for file_info in display_selection.key_files
+        ]
+        print(
+            f"[ANALYZE_SIMPLE] 중요 파일 {len(key_files)}개 수집 "
+            f"(display={selector_assignment.display_variant}, shadow={selector_assignment.shadow_variant})"
+        )
         
         # 3. 언어 통계 수집 및 기술 스택 분석
         languages = await github_client.get_languages(owner, repo_name)
@@ -1461,6 +1818,19 @@ async def analyze_repository_simple(request: RepositoryAnalysisRequest, response
         # 6. 요약 생성
         summary = repo_analyzer.generate_summary(repo_info, tech_stack)
         
+        smart_file_analysis = {
+            **display_selection.smart_file_analysis,
+            "selector_experiment": {
+                "experiment_id": selector_assignment.experiment_id,
+                "display_variant": selector_assignment.display_variant,
+                "shadow_variant": selector_assignment.shadow_variant,
+                "assignment_bucket": selector_assignment.assignment_bucket,
+                "shadow_summary": shadow_selection.smart_file_analysis.get("summary")
+                if shadow_selection
+                else None,
+            },
+        }
+
         # AnalysisResult 객체 생성
         analysis_result = AnalysisResult(
             success=True,
@@ -1471,14 +1841,43 @@ async def analyze_repository_simple(request: RepositoryAnalysisRequest, response
             key_files=key_files,
             summary=summary,
             recommendations=recommendations,
-            created_at=datetime.now()
+            created_at=datetime.now(),
+            smart_file_analysis=smart_file_analysis,
         )
         
         print(f"[ANALYZE_SIMPLE] 분석 완료 - 파일: {len(key_files)}개, 기술스택: {len(tech_stack)}개, 복잡도: {complexity_score}")
         
+        analysis_metadata = _build_analysis_metadata(
+            selected_provider_id=request.selected_provider_id,
+            summary=summary,
+            recommendations=recommendations,
+            smart_file_analysis=smart_file_analysis,
+            key_files=key_files,
+            complexity_score=complexity_score,
+        )
+
+        if request.store_results and hasattr(db, "query"):
+            _save_analysis_record(
+                db,
+                analysis_id=analysis_id,
+                repo_url=repo_url_str,
+                repo_info=repo_info,
+                tech_stack=tech_stack,
+                key_files=key_files,
+                complexity_score=complexity_score,
+                analysis_metadata=analysis_metadata,
+            )
+            _save_file_selection_runs(
+                db,
+                analysis_id=analysis_id,
+                experiment_id=selector_assignment.experiment_id,
+                runs=selector_runs,
+            )
+
         # analysis_cache에 저장하여 대시보드에서 조회 가능하도록 함
         analysis_cache[analysis_id] = analysis_result
-        response.headers["X-Analysis-Token"] = issue_analysis_token(analysis_id)
+        if response is not None:
+            response.headers["X-Analysis-Token"] = issue_analysis_token(analysis_id)
 
         print(f"[ANALYZE_SIMPLE] 분석 결과 캐시에 저장: {analysis_id}")
         print(f"[ANALYZE_SIMPLE] 캐시 크기: {len(analysis_cache)}")
@@ -1488,8 +1887,10 @@ async def analyze_repository_simple(request: RepositoryAnalysisRequest, response
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[ANALYZE_SIMPLE] 오류 발생: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {str(e)}")
+        error_text = str(e).strip() or repr(e)
+        print(f"[ANALYZE_SIMPLE] 오류 발생: {error_text}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"분석 중 오류 발생: {error_text}")
 
 
 @router.get("/dashboard/{analysis_id}")
