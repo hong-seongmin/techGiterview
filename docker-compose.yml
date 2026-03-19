@@ -52,6 +52,9 @@ services:
     environment:
       - VITE_API_URL=http://backend:8002
       - NODE_ENV=development
+      - VITE_USE_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+      - CHOKIDAR_INTERVAL=1000
     depends_on:
       - backend
     volumes:

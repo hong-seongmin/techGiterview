@@ -2,6 +2,10 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path'
 
+const usePolling =
+  process.env.VITE_USE_POLLING === 'true' ||
+  process.env.CHOKIDAR_USEPOLLING === 'true'
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
@@ -11,6 +15,11 @@ export default defineConfig({
     host: '0.0.0.0',
     port: parseInt(process.env.PORT || '3000'),
     open: false, // Docker 환경에서 false로 설정
+    watch: {
+      usePolling,
+      interval: usePolling ? parseInt(process.env.CHOKIDAR_INTERVAL || '1000', 10) : undefined,
+      ignored: ['**/.git/**', '**/node_modules/**', '**/dist/**'],
+    },
     proxy: {
       // API 프록시 설정 (Docker 기본 타깃: backend:8002)
       '/api': {
