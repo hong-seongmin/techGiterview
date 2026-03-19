@@ -506,6 +506,17 @@ class RepositoryAnalyzer:
                     if "vite" in package_dependency_tokens:
                         record_score("Node.js", 1.0)
 
+                if any(
+                    token in file_path
+                    for token in (
+                        "electron-main/",
+                        "server-main",
+                        "workbench.desktop.main",
+                        "workbench.web.main",
+                    )
+                ) or file_path == "src/main.ts":
+                    record_score("Node.js", 0.92)
+
                 elif base_name in {"pyproject.toml", "requirements.txt", "requirements-dev.txt", "setup.py"} and content:
                     if base_name == "pyproject.toml":
                         try:

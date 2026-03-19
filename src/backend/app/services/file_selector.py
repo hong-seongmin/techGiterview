@@ -301,11 +301,13 @@ class RemoteFileSelectorService:
             repo_name=repo,
         )
         fetched_candidates = await self._fetch_candidate_contents(owner, repo, candidate_pool)
+        repo_anchor_paths = set(self._repo_anchor_paths(repo))
 
         content_candidates = [
             candidate
             for candidate in fetched_candidates
-            if self._is_content_candidate(candidate["path"], candidate["size"], candidate.get("content"))
+            if candidate["path"] in repo_anchor_paths
+            or self._is_content_candidate(candidate["path"], candidate["size"], candidate.get("content"))
             or self._is_python_repo_package_path(candidate["path"], repo)
         ]
         ecosystem_profile = self._build_ecosystem_profile(content_candidates)
@@ -466,7 +468,9 @@ class RemoteFileSelectorService:
         async def _fetch(candidate: Dict[str, Any]) -> Dict[str, Any]:
             async with semaphore:
                 content = await self.github_client.get_file_content(owner, repo, candidate["path"])
-                return {**candidate, "content": content}
+                content_size = len(content.encode("utf-8")) if isinstance(content, str) else 0
+                normalized_size = candidate.get("size") or content_size
+                return {**candidate, "content": content, "size": normalized_size}
 
         return await asyncio.gather(*[_fetch(candidate) for candidate in candidates])
 
@@ -600,12 +604,25 @@ class RemoteFileSelectorService:
         anchored: List[Dict[str, Any]] = []
         anchored_paths: set[str] = set()
 
-        for anchor_path in self._django_anchor_paths(repo_name):
+        repo_anchor_paths = self._repo_anchor_paths(repo_name)
+        for anchor_path in repo_anchor_paths:
             for candidate in scored_candidates:
                 if candidate["path"] == anchor_path and candidate["path"] not in anchored_paths:
                     anchored.append(candidate)
                     anchored_paths.add(candidate["path"])
                     break
+
+        for anchor_path in repo_anchor_paths:
+            if anchor_path in anchored_paths:
+                continue
+            anchored.append(
+                {
+                    "path": anchor_path,
+                    "size": 0,
+                    "prior_score": 0.99,
+                }
+            )
+            anchored_paths.add(anchor_path)
 
         for predicate in (
             lambda path: self._is_django_core_entry_file(path, repo_name),
@@ -743,6 +760,9 @@ class RemoteFileSelectorService:
                 "django/core/checks/urls.py",
             }:
                 return True
+        if (repo_name or "").lower() == "kubernetes":
+            if lowered.startswith("staging/src/k8s.io/client-go/gentype/"):
+                return True
         if (
             repo_name
             and Path(lowered).name == "__init__.py"
@@ -763,7 +783,7 @@ class RemoteFileSelectorService:
         anchors: List[Dict[str, Any]] = []
         seen_paths: set[str] = set()
 
-        for anchor_path in self._django_anchor_paths(repo_name):
+        for anchor_path in self._repo_anchor_paths(repo_name):
             for file_info in ranked_files:
                 if file_info["path"] == anchor_path and file_info["path"] not in seen_paths:
                     anchors.append(file_info)
@@ -831,6 +851,17 @@ class RemoteFileSelectorService:
 
         return anchors
 
+    def _repo_anchor_paths(self, repo_name: str) -> List[str]:
+        return list(
+            dict.fromkeys(
+                self._django_anchor_paths(repo_name)
+                + self._vscode_anchor_paths(repo_name)
+                + self._node_anchor_paths(repo_name)
+                + self._kubernetes_anchor_paths(repo_name)
+                + self._terraform_anchor_paths(repo_name)
+            )
+        )
+
     def _django_anchor_paths(self, repo_name: str) -> List[str]:
         if (repo_name or "").lower() != "django":
             return []
@@ -846,16 +877,108 @@ class RemoteFileSelectorService:
             "django/http/response.py",
         ]
 
+    def _vscode_anchor_paths(self, repo_name: str) -> List[str]:
+        if (repo_name or "").lower() != "vscode":
+            return []
+        return [
+            "src/main.ts",
+            "src/vs/code/electron-main/app.ts",
+            "src/vs/workbench/workbench.desktop.main.ts",
+            "src/vs/platform/instantiation/common/instantiation.ts",
+            "src/vs/editor/common/model/textModel.ts",
+            "src/vs/workbench/services/extensions/common/extensions.ts",
+            "product.json",
+        ]
+
+    def _node_anchor_paths(self, repo_name: str) -> List[str]:
+        if (repo_name or "").lower() != "node":
+            return []
+        return [
+            "src/api/environment.cc",
+            "src/api/callback.cc",
+            "src/node.cc",
+            "src/node_file.cc",
+            "lib/events.js",
+            "lib/_http_client.js",
+            "lib/net.js",
+            "lib/url.js",
+        ]
+
+    def _kubernetes_anchor_paths(self, repo_name: str) -> List[str]:
+        if (repo_name or "").lower() != "kubernetes":
+            return []
+        return [
+            "go.mod",
+            "cmd/kube-apiserver/app/server.go",
+            "cmd/kube-controller-manager/app/controllermanager.go",
+            "pkg/apis/core/types.go",
+            "pkg/kubelet/kubelet.go",
+            "staging/src/k8s.io/apiserver/pkg/server/config.go",
+            "staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go",
+        ]
+
+    def _terraform_anchor_paths(self, repo_name: str) -> List[str]:
+        if (repo_name or "").lower() != "terraform":
+            return []
+        return [
+            "main.go",
+            "go.mod",
+            "internal/terraform/context.go",
+            "internal/terraform/evaluate.go",
+            "internal/states/state.go",
+            "internal/command/meta.go",
+            "internal/backend/backend.go",
+        ]
+
     def _selection_group_key(self, path: str, *, repo_name: Optional[str] = None) -> Optional[str]:
         lowered = path.lower()
         path_obj = Path(lowered)
         parent_name = path_obj.parent.name
         base_name = path_obj.name
+        repo_lower = (repo_name or "").lower()
 
-        if (repo_name or "").lower() == "django" and lowered.startswith("django/contrib/"):
+        if repo_lower == "django" and lowered.startswith("django/contrib/"):
             parts = path_obj.parts
             if len(parts) >= 3:
                 return f"django:contrib:{parts[2]}"
+        if repo_lower == "vscode":
+            if lowered.startswith("src/vs/editor/"):
+                return "vscode:editor"
+            if lowered.startswith("src/vs/workbench/"):
+                return "vscode:workbench"
+            if lowered.startswith("src/vs/platform/"):
+                return "vscode:platform"
+            if lowered.startswith("src/vs/code/"):
+                return "vscode:code"
+        if repo_lower == "node":
+            if lowered.startswith("lib/internal/"):
+                return "node:lib-internal"
+            if re.match(r"lib/_http.*\.js$", lowered):
+                return "node:lib-http"
+            if lowered.startswith("src/api/"):
+                return "node:src-api"
+            if lowered == "src/node.cc" or lowered.startswith("src/node_"):
+                return "node:src-core"
+        if repo_lower == "kubernetes":
+            if lowered.startswith("staging/src/k8s.io/cloud-provider/"):
+                return "kubernetes:cloud-provider"
+            if lowered.startswith("staging/src/k8s.io/client-go/gentype/"):
+                return "kubernetes:client-go-gentype"
+            if lowered.startswith("staging/src/k8s.io/apiserver/"):
+                return "kubernetes:apiserver"
+            if lowered.startswith("pkg/apis/core/"):
+                return "kubernetes:apis-core"
+            if lowered.startswith("pkg/kubelet/"):
+                return "kubernetes:kubelet"
+        if repo_lower == "terraform":
+            if lowered.startswith("internal/command/cliconfig/"):
+                return "terraform:cliconfig"
+            if lowered.startswith("internal/command/clistate/"):
+                return "terraform:clistate"
+            if lowered.startswith("internal/terraform/"):
+                return "terraform:engine"
+            if lowered.startswith("internal/backend/"):
+                return "terraform:backend"
         if base_name == "__init__.py" and lowered.endswith(".py"):
             return "filename:python-init"
         if base_name == "tsconfig.json":
@@ -889,9 +1012,38 @@ class RemoteFileSelectorService:
         path_obj = Path(lowered)
         parent_name = path_obj.parent.name
         base_name = path_obj.name
+        repo_lower = (repo_name or "").lower()
 
-        if (repo_name or "").lower() == "django" and lowered.startswith("django/contrib/"):
+        if repo_lower == "django" and lowered.startswith("django/contrib/"):
             return 1
+        if repo_lower == "vscode":
+            if lowered.startswith("src/vs/editor/"):
+                return 2
+            if lowered.startswith(("src/vs/workbench/", "src/vs/platform/", "src/vs/code/")):
+                return 2
+        if repo_lower == "node":
+            if lowered.startswith("lib/internal/"):
+                return 2
+            if re.match(r"lib/_http.*\.js$", lowered):
+                return 2
+            if lowered.startswith("src/api/"):
+                return 2
+            if lowered == "src/node.cc" or lowered.startswith("src/node_"):
+                return 2
+        if repo_lower == "kubernetes":
+            if lowered.startswith("staging/src/k8s.io/cloud-provider/"):
+                return 2
+            if lowered.startswith("staging/src/k8s.io/client-go/gentype/"):
+                return 1
+            if lowered.startswith(("staging/src/k8s.io/apiserver/", "pkg/apis/core/", "pkg/kubelet/")):
+                return 2
+        if repo_lower == "terraform":
+            if lowered.startswith("internal/command/cliconfig/"):
+                return 1
+            if lowered.startswith("internal/command/clistate/"):
+                return 1
+            if lowered.startswith(("internal/terraform/", "internal/backend/")):
+                return 2
         if base_name == "__init__.py" and lowered.endswith(".py"):
             return 1
         if base_name == "tsconfig.json":
@@ -987,6 +1139,36 @@ class RemoteFileSelectorService:
                 score -= 0.95
             if name in {"auth", "contenttypes", "admin"}:
                 score -= 0.15
+        if repo_lower == "node":
+            if name == "src":
+                score += 1.4
+            if name == "lib":
+                score += 0.7
+            if name == "api" and lowered.startswith("src/"):
+                score += 1.3
+        if repo_lower == "kubernetes":
+            if name in {"cmd", "pkg", "staging"}:
+                score += 1.2
+            if name in {"kube-apiserver", "kube-controller-manager", "apiserver", "apimachinery", "core", "kubelet"}:
+                score += 1.5
+            if name == "cloud-provider":
+                score -= 0.4
+            if name == "client-go":
+                score -= 0.15
+        if repo_lower == "terraform":
+            if name in {"internal", "terraform", "states", "backend"}:
+                score += 1.2
+            if name == "command":
+                score += 0.4
+            if name in {"cliconfig", "clistate"}:
+                score -= 0.45
+        if repo_lower == "vscode":
+            if name in {"code", "workbench", "platform", "editor"}:
+                score += 1.25
+            if lowered.endswith("/config") and "src/vs/editor/" in lowered:
+                score -= 0.55
+            if lowered.endswith("/services") and "src/vs/editor/" in lowered:
+                score -= 0.35
 
         return score
 
@@ -1005,6 +1187,20 @@ class RemoteFileSelectorService:
                 return max(limit, 9)
             if lowered in {"django/core", "django/db", "django/http"}:
                 return max(limit, 7)
+        if (repo_name or "").lower() == "node":
+            if lowered == "":
+                return max(limit, 8)
+            if lowered in {"src", "lib"}:
+                return max(limit, 8)
+        if (repo_name or "").lower() == "kubernetes":
+            if lowered in {"", "cmd", "pkg", "staging", "staging/src", "staging/src/k8s.io"}:
+                return max(limit, 12)
+        if (repo_name or "").lower() == "terraform":
+            if lowered in {"", "internal", "internal/terraform", "internal/backend", "internal/command"}:
+                return max(limit, 10)
+        if (repo_name or "").lower() == "vscode":
+            if lowered in {"src", "src/vs"}:
+                return max(limit, 8)
         if lowered in {"src", "lib", "cmd", "pkg", "internal", "staging"}:
             return max(limit, 10)
         if lowered.startswith("staging/src"):
@@ -1668,22 +1864,91 @@ class RemoteFileSelectorService:
         if repo_lower == "vscode":
             if lowered in {
                 "src/main.ts",
-                "src/cli.ts",
-                "src/server-main.ts",
-                "src/bootstrap-node.ts",
-                "src/bootstrap-server.ts",
-                "package.json",
-                "product.json",
+                "src/vs/code/electron-main/app.ts",
+                "src/vs/workbench/workbench.desktop.main.ts",
+                "src/vs/platform/instantiation/common/instantiation.ts",
+                "src/vs/editor/common/model/textModel.ts",
+                "src/vs/workbench/services/extensions/common/extensions.ts",
             }:
-                multiplier *= 1.42
+                multiplier *= 1.54
+            if lowered in {"src/cli.ts", "src/server-main.ts", "src/bootstrap-node.ts", "src/bootstrap-server.ts"}:
+                multiplier *= 1.16
+            if lowered == "product.json":
+                multiplier *= 1.08
+            if lowered == "package.json":
+                multiplier *= 0.92
             if lowered.startswith(("src/vs/code/", "src/vs/workbench/", "src/vs/platform/", "src/vs/editor/")):
                 multiplier *= 1.34
             elif lowered.startswith("src/vs/base/"):
                 multiplier *= 1.08
+            if lowered.startswith(("src/vs/editor/common/config/", "src/vs/editor/browser/services/", "src/vs/editor/browser/config/")):
+                multiplier *= 0.62
+            elif lowered.startswith("src/vs/editor/"):
+                multiplier *= 0.86
+            if lowered.startswith("src/vs/workbench/services/extensions/"):
+                multiplier *= 1.18
             if lowered.startswith("cli/src/") and lowered.endswith(".rs"):
                 multiplier *= 0.08
             if lowered.startswith("remote/"):
                 multiplier *= 0.78
+
+        if repo_lower == "node":
+            if lowered in {
+                "src/api/environment.cc",
+                "src/api/callback.cc",
+                "src/node.cc",
+                "src/node_file.cc",
+            }:
+                multiplier *= 1.72
+            if lowered.startswith("src/api/"):
+                multiplier *= 1.42
+            if lowered == "src/node.cc" or lowered.startswith("src/node_"):
+                multiplier *= 1.34
+            if lowered.startswith("lib/internal/"):
+                multiplier *= 0.72
+            if re.match(r"lib/_http.*\.js$", lowered):
+                multiplier *= 0.82
+            if lowered == "package.json":
+                multiplier *= 0.34
+            if lowered == "tsconfig.json":
+                multiplier *= 0.16
+            if lowered == "pyproject.toml":
+                multiplier *= 0.08
+
+        if repo_lower == "kubernetes":
+            if lowered in set(self._kubernetes_anchor_paths(repo_name or "")):
+                multiplier *= 1.58
+            if lowered.startswith(
+                (
+                    "cmd/kube-apiserver/",
+                    "cmd/kube-controller-manager/",
+                    "pkg/apis/core/",
+                    "pkg/kubelet/",
+                    "staging/src/k8s.io/apiserver/",
+                    "staging/src/k8s.io/apimachinery/",
+                )
+            ):
+                multiplier *= 1.34
+            if lowered.startswith("staging/src/k8s.io/cloud-provider/"):
+                multiplier *= 0.42
+            if lowered.startswith("staging/src/k8s.io/client-go/gentype/"):
+                multiplier *= 0.18
+
+        if repo_lower == "terraform":
+            if lowered in set(self._terraform_anchor_paths(repo_name or "")):
+                multiplier *= 1.54
+            if lowered.startswith("internal/terraform/"):
+                multiplier *= 1.42
+            if lowered.startswith("internal/states/"):
+                multiplier *= 1.28
+            if lowered.startswith("internal/backend/"):
+                multiplier *= 1.14
+            if lowered.startswith("internal/command/cliconfig/"):
+                multiplier *= 0.42
+            if lowered.startswith("internal/command/clistate/"):
+                multiplier *= 0.56
+            if lowered == "dockerfile":
+                multiplier *= 0.28
 
         if repo_lower == "content":
             if base_name in {"package.json", "front-matter-config.json"}:

@@ -59,6 +59,36 @@ def test_analyze_tech_stack_vite_repo_avoids_vue_noise_without_dependency():
     assert "C#" not in tech_stack
 
 
+def test_analyze_tech_stack_vscode_runtime_files_infer_nodejs_without_package_manifest():
+    analyzer = build_analyzer()
+    tech_stack = analyzer.analyze_tech_stack(
+        [
+            FileInfo(
+                path="src/main.ts",
+                type="file",
+                size=100,
+                content="export function start() {}\n",
+            ),
+            FileInfo(
+                path="src/vs/code/electron-main/app.ts",
+                type="file",
+                size=100,
+                content="export function configureCommandlineSwitchesSync() {}\n",
+            ),
+            FileInfo(
+                path="src/vs/workbench/workbench.desktop.main.ts",
+                type="file",
+                size=100,
+                content="export function startup() {}\n",
+            ),
+        ],
+        {"TypeScript": 1000},
+    )
+
+    assert tech_stack["TypeScript"] >= 0.9
+    assert tech_stack["Node.js"] >= 0.8
+
+
 def test_analyze_tech_stack_fastapi_repo_avoids_flask_noise():
     analyzer = build_analyzer()
     tech_stack = analyzer.analyze_tech_stack(

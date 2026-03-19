@@ -149,6 +149,40 @@ class QuestionGenerator:
             identifiers.add(token.lower())
         return identifiers
 
+    def _is_meaningful_identifier_token(self, token: str) -> bool:
+        normalized = str(token).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if len(lowered) <= 1:
+            return False
+        if lowered.startswith("__") and lowered.endswith("__"):
+            return False
+        if lowered in {
+            "this",
+            "that",
+            "from",
+            "import",
+            "return",
+            "default",
+            "module",
+            "exports",
+        }:
+            return False
+        if re.fullmatch(r"[a-z]", lowered):
+            return False
+        return True
+
+    def _is_meaningful_import_token(self, token: str) -> bool:
+        normalized = str(token).strip()
+        if not normalized:
+            return False
+        if "/" in normalized or "\\" in normalized:
+            return False
+        if normalized.startswith("."):
+            return False
+        return self._is_meaningful_identifier_token(normalized)
+
     def _is_doc_file(self, file_path: str) -> bool:
         lowered = file_path.lower()
         name = Path(lowered).name
@@ -297,16 +331,31 @@ class QuestionGenerator:
             values = extracted.get(key) or []
             for value in values:
                 normalized = str(value).strip().lower()
-                if normalized and normalized not in {"this", "that"}:
+                if key == "imports":
+                    if self._is_meaningful_import_token(normalized):
+                        return f"{key}:{normalized}"
+                elif self._is_meaningful_identifier_token(normalized):
                     return f"{key}:{normalized}"
         file_path = snippet["metadata"].get("file_path", "")
         return f"file:{Path(file_path).name.lower()}"
 
     def _select_code_analysis_focus(self, snippet: Dict[str, Any]) -> Optional[Dict[str, str]]:
         extracted = snippet["metadata"].get("extracted_elements", {})
-        classes = [str(item).strip() for item in (extracted.get("classes") or []) if str(item).strip()]
-        functions = [str(item).strip() for item in (extracted.get("functions") or []) if str(item).strip()]
-        imports = [str(item).strip() for item in (extracted.get("imports") or []) if str(item).strip()]
+        classes = [
+            str(item).strip()
+            for item in (extracted.get("classes") or [])
+            if self._is_meaningful_identifier_token(item)
+        ]
+        functions = [
+            str(item).strip()
+            for item in (extracted.get("functions") or [])
+            if self._is_meaningful_identifier_token(item)
+        ]
+        imports = [
+            str(item).strip()
+            for item in (extracted.get("imports") or [])
+            if self._is_meaningful_import_token(item)
+        ]
         weak_functions = {
             "check_url_config",
             "pytest_sessionstart",
@@ -626,12 +675,26 @@ class QuestionGenerator:
                     score += 20
                 if "/src/server/" in file_path or file_path.startswith("lib/") or "/lib/" in file_path:
                     score += 16
+                if any(
+                    token in file_path
+                    for token in (
+                        "electron-main",
+                        "bootstrap-node",
+                        "bootstrap-server",
+                        "server-main",
+                    )
+                ):
+                    score += 18
+                if base_name in {"main.ts", "main.js", "cli.ts", "cli.js"}:
+                    score += 14
+                if file_path.endswith((".cc", ".cpp", ".hpp", ".h")):
+                    score += 20
                 if file_path.startswith("packages/") and repo_aliases and not any(
                     file_path.startswith(f"packages/{alias}/") for alias in repo_aliases
                 ):
                     score -= 16
                 if base_name == "package.json":
-                    score += 10 if any(root and file_path == f"{root}/package.json" for root in package_roots) else -10
+                    score += 2 if any(root and file_path == f"{root}/package.json" for root in package_roots) else -14
                 if base_name in {"index.ts", "index.js", "server.ts", "server.js", "main.ts", "main.js"}:
                     score += 10
             elif tech_name == "TypeScript":
@@ -799,6 +862,12 @@ class QuestionGenerator:
                 or "/src/server/" in snippet["metadata"].get("file_path", "").lower()
                 or snippet["metadata"].get("file_path", "").lower().startswith("lib/")
                 or "/lib/" in snippet["metadata"].get("file_path", "").lower()
+                or any(
+                    token in snippet["metadata"].get("file_path", "").lower()
+                    for token in ("electron-main", "bootstrap-node", "bootstrap-server", "server-main")
+                )
+                or Path(snippet["metadata"].get("file_path", "").lower()).name in {"main.ts", "main.js", "cli.ts", "cli.js"}
+                or snippet["metadata"].get("file_path", "").lower().endswith((".cc", ".cpp", ".hpp", ".h"))
                 or "package.json" in snippet["metadata"].get("file_path", "").lower(),
             ),
             (
@@ -1043,6 +1112,12 @@ class QuestionGenerator:
                 any(token in lowered for token in ("/src/node/", "/src/client/"))
                 and self._is_runtime_entry_like(base_name)
             ) or base_name in {
+                "main.ts",
+                "main.js",
+                "server-main.ts",
+                "server-main.js",
+                "workbench.desktop.main.ts",
+                "workbench.web.main.ts",
                 "app.py",
                 "main.py",
                 "server.py",
@@ -1072,6 +1147,7 @@ class QuestionGenerator:
                     "pnpm-workspace.yaml",
                     "pnpm-workspace.yml",
                     "tsconfig.json",
+                    "product.json",
                     "pyproject.toml",
                     "requirements.txt",
                     "requirements-dev.txt",
@@ -1090,7 +1166,11 @@ class QuestionGenerator:
 
             if "/src/node/" in lowered:
                 context["evidence_terms"].add("node-runtime")
+            if any(token in lowered for token in ("electron-main", "server-main")) or lowered == "src/main.ts":
+                context["evidence_terms"].add("node-runtime")
             if "/src/client/" in lowered:
+                context["evidence_terms"].add("client-runtime")
+            if "workbench" in lowered or "/editor/" in lowered:
                 context["evidence_terms"].add("client-runtime")
             if lowered.endswith(".py"):
                 context["evidence_terms"].add("python-backend")
@@ -1136,7 +1216,26 @@ class QuestionGenerator:
             if "depends(" in content or "/dependencies/" in lowered:
                 context["evidence_terms"].add("dependency-injection")
             if (
-                base_name in {"applications.py", "app.py", "main.py", "server.py", "settings.py", "wsgi.py", "asgi.py", "main.go", "main.rs", "lib.rs", "mod.rs", "cobra.go"}
+                base_name in {
+                    "applications.py",
+                    "app.py",
+                    "main.py",
+                    "main.ts",
+                    "main.js",
+                    "server.py",
+                    "server-main.ts",
+                    "server-main.js",
+                    "workbench.desktop.main.ts",
+                    "workbench.web.main.ts",
+                    "settings.py",
+                    "wsgi.py",
+                    "asgi.py",
+                    "main.go",
+                    "main.rs",
+                    "lib.rs",
+                    "mod.rs",
+                    "cobra.go",
+                }
                 or lowered in django_entry_like_paths
                 or lowered == "django/apps/config.py"
             ):
@@ -1266,6 +1365,29 @@ class QuestionGenerator:
             snippet for snippet in eligible
             if "/src/server/" in snippet["metadata"].get("file_path", "").lower()
         ]
+        vscode_electron_files = [
+            snippet for snippet in eligible
+            if any(
+                token in snippet["metadata"].get("file_path", "").lower()
+                for token in ("electron-main", "server-main")
+            )
+            or snippet["metadata"].get("file_path", "").lower() == "src/main.ts"
+        ]
+        vscode_workbench_files = [
+            snippet for snippet in eligible
+            if "workbench" in snippet["metadata"].get("file_path", "").lower()
+        ]
+        vscode_editor_files = [
+            snippet for snippet in eligible
+            if "/editor/" in snippet["metadata"].get("file_path", "").lower()
+            or "textmodel" in snippet["metadata"].get("file_path", "").lower()
+            or snippet["metadata"].get("file_path", "").lower().endswith("languages.ts")
+        ]
+        vscode_extension_files = [
+            snippet for snippet in eligible
+            if "extensions" in snippet["metadata"].get("file_path", "").lower()
+            or "exthost" in snippet["metadata"].get("file_path", "").lower()
+        ]
         node_files = [snippet for snippet in eligible if "/src/node/" in snippet["metadata"].get("file_path", "").lower()]
         client_files = [
             snippet for snippet in eligible
@@ -1291,6 +1413,10 @@ class QuestionGenerator:
             go_entry_files[:2],
             go_request_files[:3],
             rust_core_files[:3],
+            vscode_electron_files[:2],
+            vscode_workbench_files[:2],
+            vscode_editor_files[:1],
+            vscode_extension_files[:1],
             server_runtime_files[:2],
             client_files[:2],
             backend_js_runtime_files[:3],
@@ -1320,6 +1446,38 @@ class QuestionGenerator:
             "cli.js",
         }
 
+    def _package_json_question_tokens(self, snippet: Dict[str, Any]) -> List[str]:
+        file_path = snippet["metadata"].get("file_path", "")
+        if Path(file_path).name.lower() != "package.json":
+            return []
+        try:
+            package_data = json.loads(snippet.get("content") or "{}")
+        except Exception:
+            return []
+
+        tokens: List[str] = []
+        tokens.extend(list((package_data.get("scripts") or {}).keys())[:4])
+        for manifest_key in ("main", "module", "type", "bin", "workspaces", "engines", "exports", "browser"):
+            if manifest_key in package_data:
+                tokens.append(manifest_key)
+
+        if not tokens:
+            dependencies = {
+                **(package_data.get("dependencies") or {}),
+                **(package_data.get("devDependencies") or {}),
+                **(package_data.get("peerDependencies") or {}),
+            }
+            tokens.extend(list(dependencies.keys())[:3])
+
+        deduped: List[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            normalized = str(token).strip()
+            if normalized and normalized not in seen:
+                deduped.append(normalized)
+                seen.add(normalized)
+        return deduped[:5]
+
     def _validate_tech_stack_question(
         self,
         question_text: str,
@@ -1347,15 +1505,7 @@ class QuestionGenerator:
 
         file_path = snippet["metadata"].get("file_path", "")
         if file_path.endswith("package.json"):
-            try:
-                package_data = json.loads(snippet.get("content") or "{}")
-            except Exception:
-                package_data = {}
-            evidence_tokens = list((package_data.get("scripts") or {}).keys())[:4]
-            evidence_tokens += list({
-                **(package_data.get("dependencies") or {}),
-                **(package_data.get("devDependencies") or {}),
-            }.keys())[:4]
+            evidence_tokens = [token.lower() for token in self._package_json_question_tokens(snippet)]
             if evidence_tokens and not any(token.lower() in normalized for token in evidence_tokens):
                 return False
         else:
@@ -1434,6 +1584,8 @@ class QuestionGenerator:
         }
         if any(token in banned_identifiers for token in referenced_identifiers):
             return False
+        if any(len(token) <= 1 for token in referenced_identifiers):
+            return False
         if any(token in weak_identifiers for token in referenced_identifiers):
             return False
         if referenced_identifiers and evidence_tokens:
@@ -1466,6 +1618,15 @@ class QuestionGenerator:
         ]
         if not any(token and token in normalized for token in path_tokens[:6]):
             return False
+        focus_files = architecture_context.get("focus_files", [])
+        if len(focus_files) >= 2:
+            matched_focus_files = {
+                path
+                for path in focus_files[:4]
+                if path.lower() in normalized or Path(path).name.lower() in normalized
+            }
+            if len(matched_focus_files) < 2:
+                return False
         evidence_terms = set(term.lower() for term in architecture_context.get("evidence_terms", []))
         allowed_paths = (
             architecture_context.get("entry_files", [])
@@ -1570,6 +1731,25 @@ class QuestionGenerator:
             if path.lower().endswith((".ts", ".tsx", ".js", ".jsx"))
         ]
         api_files = [path for path in entry_files + module_files if "/src/api/" in path.lower()]
+        electron_main_files = [
+            path for path in entry_files + module_files
+            if any(token in path.lower() for token in ("electron-main", "server-main"))
+            or path.lower() == "src/main.ts"
+        ]
+        workbench_runtime_files = [
+            path for path in entry_files + module_files
+            if "workbench" in path.lower()
+        ]
+        editor_runtime_files = [
+            path for path in entry_files + module_files
+            if "/editor/" in path.lower()
+            or "textmodel" in path.lower()
+            or path.lower().endswith("languages.ts")
+        ]
+        extension_runtime_files = [
+            path for path in entry_files + module_files
+            if "extensions" in path.lower() or "exthost" in path.lower()
+        ]
         build_files = [path for path in module_files if "build" in Path(path).name.lower()]
         preview_files = [path for path in entry_files + module_files if "preview" in Path(path).name.lower()]
         workspace_files = [
@@ -1765,7 +1945,29 @@ class QuestionGenerator:
             }
         ]
 
-        if "content-validation" in architecture_context.get("evidence_terms", []):
+        if electron_main_files or workbench_runtime_files:
+            desktop_config_files = [
+                path for path in config_files
+                if Path(path).name.lower() in {"product.json", "package.json", "tsconfig.json"}
+            ]
+            focus_modes = [
+                {
+                    "name": "desktop-runtime-boundary",
+                    "files": electron_main_files[:2] + workbench_runtime_files[:1] + desktop_config_files[:1],
+                    "instruction": "electron-main 진입점과 workbench 런타임이 어떻게 연결되고 책임이 나뉘는지 중심으로 질문하세요.",
+                },
+                {
+                    "name": "desktop-service-boundary",
+                    "files": workbench_runtime_files[:1] + extension_runtime_files[:1] + desktop_config_files[:1] + electron_main_files[:1],
+                    "instruction": "workbench 서비스와 extension/runtime 계층의 책임 경계가 어떻게 나뉘는지 중심으로 질문하세요.",
+                },
+                {
+                    "name": "editor-model-boundary",
+                    "files": editor_runtime_files[:2] + workbench_runtime_files[:1] + desktop_config_files[:1],
+                    "instruction": "editor model 계층과 workbench 런타임이 어떤 역할로 분리되는지 중심으로 질문하세요.",
+                },
+            ]
+        elif "content-validation" in architecture_context.get("evidence_terms", []):
             focus_modes = [
                 {
                     "name": "content-validation",
@@ -2084,15 +2286,7 @@ class QuestionGenerator:
             file_path = snippet["metadata"].get("file_path", "")
             base_name = Path(file_path).name.lower()
             if base_name == "package.json":
-                try:
-                    package_data = json.loads(snippet.get("content") or "{}")
-                except Exception:
-                    package_data = {}
-                evidence = list((package_data.get("scripts") or {}).keys())[:2]
-                evidence += list({
-                    **(package_data.get("dependencies") or {}),
-                    **(package_data.get("devDependencies") or {}),
-                }.keys())[:2]
+                evidence = self._package_json_question_tokens(snippet)[:3]
                 if evidence:
                     evidence_text = ", ".join(evidence)
                     return f"`{file_path}`에서 `{evidence_text}` 설정이 {tech}가 현재 빌드/런타임 구조에서 맡는 역할을 어떻게 보여주는지 설명해주세요."
@@ -2128,6 +2322,12 @@ class QuestionGenerator:
             return f"{file_label} 기준으로 이 저장소의 build 파이프라인과 preview 흐름이 어떻게 연결되고 분리되는지 설명해주세요."
         if focus_name == "workspace-boundary":
             return f"{file_label} 기준으로 workspace 설정과 패키지 경계가 런타임 모듈 구조에 어떤 영향을 주는지 설명해주세요."
+        if focus_name == "desktop-runtime-boundary":
+            return f"{file_label} 기준으로 electron-main 진입점과 workbench 런타임 책임이 어떻게 나뉘는지 설명해주세요."
+        if focus_name == "desktop-service-boundary":
+            return f"{file_label} 기준으로 workbench 서비스와 extension/runtime 계층의 책임 경계가 어떻게 설계되어 있는지 설명해주세요."
+        if focus_name == "editor-model-boundary":
+            return f"{file_label} 기준으로 editor model 계층과 workbench 런타임이 어떤 역할로 분리되는지 설명해주세요."
         if focus_name == "package-entry-core":
             return f"{file_label} 기준으로 핵심 패키지의 진입점과 내부 모듈 구성이 어떻게 연결되는지 설명해주세요."
         if focus_name == "workspace-package-boundary":

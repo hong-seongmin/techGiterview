@@ -217,8 +217,14 @@ class FakeNodeGitHubClient:
             "pyproject.toml": '[project]\nname="node-tools"\n',
             "tsconfig.json": '{"compilerOptions":{"allowJs":true}}',
             "package.json": '{"name":"node","scripts":{"test":"python tools/test.py"}}',
+            "src/api/environment.cc": "void SetEnv() {}\n",
+            "src/api/callback.cc": "void MakeCallback() {}\n",
+            "src/node.cc": "void Start() {}\n",
+            "src/node_file.cc": "void InitFs() {}\n",
             "lib/events.js": 'function emit() { return null }\nmodule.exports = { emit }\n',
             "lib/_http_client.js": 'function request() { return null }\nmodule.exports = { request }\n',
+            "lib/net.js": 'function createConnection() { return null }\nmodule.exports = { createConnection }\n',
+            "lib/url.js": 'function URL() { return null }\nmodule.exports = { URL }\n',
             "lib/internal/url.js": 'function normalize() { return null }\nmodule.exports = { normalize }\n',
         }
 
@@ -228,13 +234,26 @@ class FakeNodeGitHubClient:
                 {"path": "pyproject.toml", "name": "pyproject.toml", "type": "file", "size": 80},
                 {"path": "tsconfig.json", "name": "tsconfig.json", "type": "file", "size": 120},
                 {"path": "package.json", "name": "package.json", "type": "file", "size": 180},
+                {"path": "src", "name": "src", "type": "dir"},
                 {"path": "lib", "name": "lib", "type": "dir"},
+            ]
+        if path == "src":
+            return [
+                {"path": "src/api", "name": "api", "type": "dir"},
+                {"path": "src/node.cc", "name": "node.cc", "type": "file", "size": 260},
+                {"path": "src/node_file.cc", "name": "node_file.cc", "type": "file", "size": 240},
+            ]
+        if path == "src/api":
+            return [
+                {"path": "src/api/environment.cc", "name": "environment.cc", "type": "file", "size": 220},
+                {"path": "src/api/callback.cc", "name": "callback.cc", "type": "file", "size": 210},
             ]
         if path == "lib":
             return [
                 {"path": "lib/internal", "name": "internal", "type": "dir"},
                 {"path": "lib/events.js", "name": "events.js", "type": "file", "size": 220},
                 {"path": "lib/_http_client.js", "name": "_http_client.js", "type": "file", "size": 220},
+                {"path": "lib/net.js", "name": "net.js", "type": "file", "size": 210},
             ]
         if path == "lib/internal":
             return [
@@ -367,9 +386,11 @@ class FakeDjangoGitHubClient:
             "django/urls/base.py": "def path(route, view):\n    return route, view\n",
             "django/core/handlers/base.py": "class BaseHandler:\n    pass\n",
             "django/core/handlers/wsgi.py": "class WSGIHandler:\n    pass\n",
+            "django/core/handlers/asgi.py": "class ASGIHandler:\n    pass\n",
             "django/core/management/base.py": "class BaseCommand:\n    pass\n",
             "django/db/models/base.py": "class Model:\n    pass\n",
             "django/http/request.py": "class HttpRequest:\n    pass\n",
+            "django/http/response.py": "class HttpResponse:\n    pass\n",
             "django/middleware/common.py": "class CommonMiddleware:\n    pass\n",
             "django/apps/config.py": "class AppConfig:\n    pass\n",
             "django/apps/registry.py": "class Apps:\n    pass\n",
@@ -411,6 +432,7 @@ class FakeDjangoGitHubClient:
             return [
                 {"path": "django/core/handlers/base.py", "name": "base.py", "type": "file", "size": 140},
                 {"path": "django/core/handlers/wsgi.py", "name": "wsgi.py", "type": "file", "size": 140},
+                {"path": "django/core/handlers/asgi.py", "name": "asgi.py", "type": "file", "size": 140},
             ]
         if path == "django/core/management":
             return [{"path": "django/core/management/base.py", "name": "base.py", "type": "file", "size": 140}]
@@ -419,7 +441,10 @@ class FakeDjangoGitHubClient:
         if path == "django/db/models":
             return [{"path": "django/db/models/base.py", "name": "base.py", "type": "file", "size": 140}]
         if path == "django/http":
-            return [{"path": "django/http/request.py", "name": "request.py", "type": "file", "size": 140}]
+            return [
+                {"path": "django/http/request.py", "name": "request.py", "type": "file", "size": 140},
+                {"path": "django/http/response.py", "name": "response.py", "type": "file", "size": 140},
+            ]
         if path == "django/middleware":
             return [{"path": "django/middleware/common.py", "name": "common.py", "type": "file", "size": 140}]
         if path == "django/apps":
@@ -719,9 +744,15 @@ class FakeVSCodeGitHubClient:
             "src/main.ts": 'import { bootstrapWindow } from "./bootstrap-node";\nexport function startup() { return bootstrapWindow(); }\n',
             "src/cli.ts": 'export function runCLI() { return true }\n',
             "src/vs/code/electron-main/main.ts": 'export function openWindow() { return true }\n',
+            "src/vs/code/electron-main/app.ts": 'export function configureCommandlineSwitchesSync() { return true }\n',
             "src/vs/workbench/browser/workbench.ts": 'export function createWorkbench() { return true }\n',
+            "src/vs/workbench/workbench.desktop.main.ts": 'export function openWorkbench() { return true }\n',
+            "src/vs/workbench/services/extensions/common/extensions.ts": 'export function loadExtensions() { return true }\n',
             "src/vs/platform/instantiation/common/instantiation.ts": 'export function createDecorator() { return true }\n',
             "src/vs/editor/common/config/editorConfiguration.ts": 'export function computeOptions() { return true }\n',
+            "src/vs/editor/common/config/fontInfoFromSettings.ts": 'export function fontInfoFromSettings() { return true }\n',
+            "src/vs/editor/common/model/textModel.ts": 'export class TextModel {}\n',
+            "src/vs/editor/browser/services/codeEditorService.ts": 'export function createCodeEditorService() { return true }\n',
             "src/vs/base/common/uri.ts": 'export class URI {}\n',
             "cli/src/lib.rs": "pub fn init_cli() {}\n",
             "cli/src/tunnels/control_server.rs": "pub fn serve_tunnel() {}\n",
@@ -752,11 +783,24 @@ class FakeVSCodeGitHubClient:
         if path == "src/vs/code":
             return [{"path": "src/vs/code/electron-main", "name": "electron-main", "type": "dir"}]
         if path == "src/vs/code/electron-main":
-            return [{"path": "src/vs/code/electron-main/main.ts", "name": "main.ts", "type": "file", "size": 240}]
+            return [
+                {"path": "src/vs/code/electron-main/main.ts", "name": "main.ts", "type": "file", "size": 240},
+                {"path": "src/vs/code/electron-main/app.ts", "name": "app.ts", "type": "file", "size": 260},
+            ]
         if path == "src/vs/workbench":
-            return [{"path": "src/vs/workbench/browser", "name": "browser", "type": "dir"}]
+            return [
+                {"path": "src/vs/workbench/browser", "name": "browser", "type": "dir"},
+                {"path": "src/vs/workbench/services", "name": "services", "type": "dir"},
+                {"path": "src/vs/workbench/workbench.desktop.main.ts", "name": "workbench.desktop.main.ts", "type": "file", "size": 250},
+            ]
         if path == "src/vs/workbench/browser":
             return [{"path": "src/vs/workbench/browser/workbench.ts", "name": "workbench.ts", "type": "file", "size": 220}]
+        if path == "src/vs/workbench/services":
+            return [{"path": "src/vs/workbench/services/extensions", "name": "extensions", "type": "dir"}]
+        if path == "src/vs/workbench/services/extensions":
+            return [{"path": "src/vs/workbench/services/extensions/common", "name": "common", "type": "dir"}]
+        if path == "src/vs/workbench/services/extensions/common":
+            return [{"path": "src/vs/workbench/services/extensions/common/extensions.ts", "name": "extensions.ts", "type": "file", "size": 210}]
         if path == "src/vs/platform":
             return [{"path": "src/vs/platform/instantiation", "name": "instantiation", "type": "dir"}]
         if path == "src/vs/platform/instantiation":
@@ -764,11 +808,26 @@ class FakeVSCodeGitHubClient:
         if path == "src/vs/platform/instantiation/common":
             return [{"path": "src/vs/platform/instantiation/common/instantiation.ts", "name": "instantiation.ts", "type": "file", "size": 200}]
         if path == "src/vs/editor":
-            return [{"path": "src/vs/editor/common", "name": "common", "type": "dir"}]
+            return [
+                {"path": "src/vs/editor/common", "name": "common", "type": "dir"},
+                {"path": "src/vs/editor/browser", "name": "browser", "type": "dir"},
+            ]
         if path == "src/vs/editor/common":
-            return [{"path": "src/vs/editor/common/config", "name": "config", "type": "dir"}]
+            return [
+                {"path": "src/vs/editor/common/config", "name": "config", "type": "dir"},
+                {"path": "src/vs/editor/common/model", "name": "model", "type": "dir"},
+            ]
         if path == "src/vs/editor/common/config":
-            return [{"path": "src/vs/editor/common/config/editorConfiguration.ts", "name": "editorConfiguration.ts", "type": "file", "size": 210}]
+            return [
+                {"path": "src/vs/editor/common/config/editorConfiguration.ts", "name": "editorConfiguration.ts", "type": "file", "size": 210},
+                {"path": "src/vs/editor/common/config/fontInfoFromSettings.ts", "name": "fontInfoFromSettings.ts", "type": "file", "size": 190},
+            ]
+        if path == "src/vs/editor/common/model":
+            return [{"path": "src/vs/editor/common/model/textModel.ts", "name": "textModel.ts", "type": "file", "size": 220}]
+        if path == "src/vs/editor/browser":
+            return [{"path": "src/vs/editor/browser/services", "name": "services", "type": "dir"}]
+        if path == "src/vs/editor/browser/services":
+            return [{"path": "src/vs/editor/browser/services/codeEditorService.ts", "name": "codeEditorService.ts", "type": "file", "size": 210}]
         if path == "src/vs/base":
             return [{"path": "src/vs/base/common", "name": "common", "type": "dir"}]
         if path == "src/vs/base/common":
@@ -782,6 +841,160 @@ class FakeVSCodeGitHubClient:
             ]
         if path == "cli/src/tunnels":
             return [{"path": "cli/src/tunnels/control_server.rs", "name": "control_server.rs", "type": "file", "size": 230}]
+        return []
+
+    async def get_file_content(self, owner: str, repo: str, file_path: str):
+        return self.contents[file_path]
+
+
+class FakeKubernetesGitHubClient:
+    def __init__(self):
+        self.contents = {
+            "go.mod": "module k8s.io/kubernetes\n",
+            "cmd/kube-apiserver/app/server.go": "package app\nfunc NewAPIServerCommand() {}\n",
+            "cmd/kube-controller-manager/app/controllermanager.go": "package app\nfunc Run() {}\n",
+            "cmd/cloud-controller-manager/main.go": "package main\nfunc main() {}\n",
+            "pkg/apis/core/types.go": "package core\n type Pod struct{}\n",
+            "pkg/kubelet/kubelet.go": "package kubelet\n type Kubelet struct{}\n",
+            "staging/src/k8s.io/apiserver/pkg/server/config.go": "package server\n type Config struct{}\n",
+            "staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go": "package v1\n type ObjectMeta struct{}\n",
+            "staging/src/k8s.io/cloud-provider/cloud.go": "package cloudprovider\n type Interface interface{}\n",
+            "staging/src/k8s.io/cloud-provider/app/core.go": "package app\n func RunCloud() {}\n",
+            "staging/src/k8s.io/client-go/gentype/fake.go": "package gentype\n type FakeClient struct{}\n",
+        }
+
+    async def get_repository_contents(self, owner: str, repo: str, path: str = ""):
+        if path == "":
+            return [
+                {"path": "go.mod", "name": "go.mod", "type": "file", "size": 140},
+                {"path": "cmd", "name": "cmd", "type": "dir"},
+                {"path": "pkg", "name": "pkg", "type": "dir"},
+                {"path": "staging", "name": "staging", "type": "dir"},
+            ]
+        if path == "cmd":
+            return [
+                {"path": "cmd/kube-apiserver", "name": "kube-apiserver", "type": "dir"},
+                {"path": "cmd/kube-controller-manager", "name": "kube-controller-manager", "type": "dir"},
+                {"path": "cmd/cloud-controller-manager", "name": "cloud-controller-manager", "type": "dir"},
+            ]
+        if path == "cmd/kube-apiserver":
+            return [{"path": "cmd/kube-apiserver/app", "name": "app", "type": "dir"}]
+        if path == "cmd/kube-apiserver/app":
+            return [{"path": "cmd/kube-apiserver/app/server.go", "name": "server.go", "type": "file", "size": 260}]
+        if path == "cmd/kube-controller-manager":
+            return [{"path": "cmd/kube-controller-manager/app", "name": "app", "type": "dir"}]
+        if path == "cmd/kube-controller-manager/app":
+            return [{"path": "cmd/kube-controller-manager/app/controllermanager.go", "name": "controllermanager.go", "type": "file", "size": 240}]
+        if path == "cmd/cloud-controller-manager":
+            return [{"path": "cmd/cloud-controller-manager/main.go", "name": "main.go", "type": "file", "size": 220}]
+        if path == "pkg":
+            return [
+                {"path": "pkg/apis", "name": "apis", "type": "dir"},
+                {"path": "pkg/kubelet", "name": "kubelet", "type": "dir"},
+            ]
+        if path == "pkg/apis":
+            return [{"path": "pkg/apis/core", "name": "core", "type": "dir"}]
+        if path == "pkg/apis/core":
+            return [{"path": "pkg/apis/core/types.go", "name": "types.go", "type": "file", "size": 230}]
+        if path == "pkg/kubelet":
+            return [{"path": "pkg/kubelet/kubelet.go", "name": "kubelet.go", "type": "file", "size": 230}]
+        if path == "staging":
+            return [{"path": "staging/src", "name": "src", "type": "dir"}]
+        if path == "staging/src":
+            return [{"path": "staging/src/k8s.io", "name": "k8s.io", "type": "dir"}]
+        if path == "staging/src/k8s.io":
+            return [
+                {"path": "staging/src/k8s.io/apiserver", "name": "apiserver", "type": "dir"},
+                {"path": "staging/src/k8s.io/apimachinery", "name": "apimachinery", "type": "dir"},
+                {"path": "staging/src/k8s.io/cloud-provider", "name": "cloud-provider", "type": "dir"},
+                {"path": "staging/src/k8s.io/client-go", "name": "client-go", "type": "dir"},
+            ]
+        if path == "staging/src/k8s.io/apiserver":
+            return [{"path": "staging/src/k8s.io/apiserver/pkg", "name": "pkg", "type": "dir"}]
+        if path == "staging/src/k8s.io/apiserver/pkg":
+            return [{"path": "staging/src/k8s.io/apiserver/pkg/server", "name": "server", "type": "dir"}]
+        if path == "staging/src/k8s.io/apiserver/pkg/server":
+            return [{"path": "staging/src/k8s.io/apiserver/pkg/server/config.go", "name": "config.go", "type": "file", "size": 240}]
+        if path == "staging/src/k8s.io/apimachinery":
+            return [{"path": "staging/src/k8s.io/apimachinery/pkg", "name": "pkg", "type": "dir"}]
+        if path == "staging/src/k8s.io/apimachinery/pkg":
+            return [{"path": "staging/src/k8s.io/apimachinery/pkg/apis", "name": "apis", "type": "dir"}]
+        if path == "staging/src/k8s.io/apimachinery/pkg/apis":
+            return [{"path": "staging/src/k8s.io/apimachinery/pkg/apis/meta", "name": "meta", "type": "dir"}]
+        if path == "staging/src/k8s.io/apimachinery/pkg/apis/meta":
+            return [{"path": "staging/src/k8s.io/apimachinery/pkg/apis/meta/v1", "name": "v1", "type": "dir"}]
+        if path == "staging/src/k8s.io/apimachinery/pkg/apis/meta/v1":
+            return [{"path": "staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go", "name": "types.go", "type": "file", "size": 220}]
+        if path == "staging/src/k8s.io/cloud-provider":
+            return [
+                {"path": "staging/src/k8s.io/cloud-provider/cloud.go", "name": "cloud.go", "type": "file", "size": 210},
+                {"path": "staging/src/k8s.io/cloud-provider/app", "name": "app", "type": "dir"},
+            ]
+        if path == "staging/src/k8s.io/cloud-provider/app":
+            return [{"path": "staging/src/k8s.io/cloud-provider/app/core.go", "name": "core.go", "type": "file", "size": 210}]
+        if path == "staging/src/k8s.io/client-go":
+            return [{"path": "staging/src/k8s.io/client-go/gentype", "name": "gentype", "type": "dir"}]
+        if path == "staging/src/k8s.io/client-go/gentype":
+            return [{"path": "staging/src/k8s.io/client-go/gentype/fake.go", "name": "fake.go", "type": "file", "size": 180}]
+        return []
+
+    async def get_file_content(self, owner: str, repo: str, file_path: str):
+        return self.contents[file_path]
+
+
+class FakeTerraformGitHubClient:
+    def __init__(self):
+        self.contents = {
+            "main.go": "package main\nfunc main() {}\n",
+            "go.mod": "module github.com/hashicorp/terraform\n",
+            "Dockerfile": "FROM golang:1.24\n",
+            "internal/terraform/context.go": "package terraform\ntype Context struct{}\n",
+            "internal/terraform/evaluate.go": "package terraform\nfunc Evaluate() {}\n",
+            "internal/states/state.go": "package states\ntype State struct{}\n",
+            "internal/command/meta.go": "package command\ntype Meta struct{}\n",
+            "internal/backend/backend.go": "package backend\ntype Backend interface{}\n",
+            "internal/command/cliconfig/config_unix.go": "package cliconfig\nfunc ConfigFile() string { return \"\" }\n",
+            "internal/command/cliconfig/plugins.go": "package cliconfig\nfunc PluginsDir() string { return \"\" }\n",
+            "internal/command/clistate/state.go": "package clistate\ntype StateMeta struct{}\n",
+        }
+
+    async def get_repository_contents(self, owner: str, repo: str, path: str = ""):
+        if path == "":
+            return [
+                {"path": "main.go", "name": "main.go", "type": "file", "size": 120},
+                {"path": "go.mod", "name": "go.mod", "type": "file", "size": 110},
+                {"path": "Dockerfile", "name": "Dockerfile", "type": "file", "size": 70},
+                {"path": "internal", "name": "internal", "type": "dir"},
+            ]
+        if path == "internal":
+            return [
+                {"path": "internal/terraform", "name": "terraform", "type": "dir"},
+                {"path": "internal/states", "name": "states", "type": "dir"},
+                {"path": "internal/backend", "name": "backend", "type": "dir"},
+                {"path": "internal/command", "name": "command", "type": "dir"},
+            ]
+        if path == "internal/terraform":
+            return [
+                {"path": "internal/terraform/context.go", "name": "context.go", "type": "file", "size": 220},
+                {"path": "internal/terraform/evaluate.go", "name": "evaluate.go", "type": "file", "size": 230},
+            ]
+        if path == "internal/states":
+            return [{"path": "internal/states/state.go", "name": "state.go", "type": "file", "size": 210}]
+        if path == "internal/backend":
+            return [{"path": "internal/backend/backend.go", "name": "backend.go", "type": "file", "size": 190}]
+        if path == "internal/command":
+            return [
+                {"path": "internal/command/meta.go", "name": "meta.go", "type": "file", "size": 220},
+                {"path": "internal/command/cliconfig", "name": "cliconfig", "type": "dir"},
+                {"path": "internal/command/clistate", "name": "clistate", "type": "dir"},
+            ]
+        if path == "internal/command/cliconfig":
+            return [
+                {"path": "internal/command/cliconfig/config_unix.go", "name": "config_unix.go", "type": "file", "size": 200},
+                {"path": "internal/command/cliconfig/plugins.go", "name": "plugins.go", "type": "file", "size": 210},
+            ]
+        if path == "internal/command/clistate":
+            return [{"path": "internal/command/clistate/state.go", "name": "state.go", "type": "file", "size": 190}]
         return []
 
     async def get_file_content(self, owner: str, repo: str, file_path: str):
@@ -1077,14 +1290,17 @@ async def test_selector_v2_prefers_core_package_over_tooling_packages_in_monorep
 async def test_selector_v2_downranks_foreign_root_configs_without_matching_sources():
     service = RemoteFileSelectorService(FakeNodeGitHubClient())
 
-    result = await service.select_v2("nodejs", "node", top_n=4, candidate_limit=8)
+    result = await service.select_v2("nodejs", "node", top_n=6, candidate_limit=10)
 
     selected_paths = [file_info["path"] for file_info in result.key_files]
 
+    assert "src/api/environment.cc" in selected_paths
+    assert "src/node.cc" in selected_paths
     assert "lib/events.js" in selected_paths
     assert "lib/_http_client.js" in selected_paths
-    assert len([path for path in selected_paths if path.startswith("lib/")]) >= 2
-    assert selected_paths[0] != "tsconfig.json"
+    assert len([path for path in selected_paths if path.startswith("lib/internal/")]) <= 1
+    assert selected_paths[0] != "package.json"
+    assert selected_paths[1] != "tsconfig.json"
     assert "pyproject.toml" not in selected_paths[:3]
 
 
@@ -1223,10 +1439,49 @@ async def test_selector_v2_prefers_vscode_ts_core_over_secondary_rust_cli():
     selected_paths = [file_info["path"] for file_info in result.key_files]
 
     assert "src/main.ts" in selected_paths[:3]
-    assert "src/vs/code/electron-main/main.ts" in selected_paths
-    assert "src/vs/workbench/browser/workbench.ts" in selected_paths
+    assert "src/vs/code/electron-main/app.ts" in selected_paths
+    assert "src/vs/workbench/workbench.desktop.main.ts" in selected_paths
+    assert "src/vs/platform/instantiation/common/instantiation.ts" in selected_paths
+    assert "src/vs/workbench/services/extensions/common/extensions.ts" in selected_paths
+    assert "src/vs/editor/common/model/textModel.ts" in selected_paths
+    assert "package.json" not in selected_paths[:3]
+    assert "src/vs/editor/common/config/fontInfoFromSettings.ts" not in selected_paths[:6]
+    assert "src/vs/editor/browser/services/codeEditorService.ts" not in selected_paths[:6]
     assert "cli/src/lib.rs" not in selected_paths[:6]
     assert "cli/src/tunnels/control_server.rs" not in selected_paths[:6]
+
+
+@pytest.mark.asyncio
+async def test_selector_v2_prefers_kubernetes_core_over_cloud_provider_slice():
+    service = RemoteFileSelectorService(FakeKubernetesGitHubClient())
+
+    result = await service.select_v2("kubernetes", "kubernetes", top_n=8, candidate_limit=14)
+    selected_paths = [file_info["path"] for file_info in result.key_files]
+
+    assert "cmd/kube-apiserver/app/server.go" in selected_paths
+    assert "pkg/apis/core/types.go" in selected_paths
+    assert "pkg/kubelet/kubelet.go" in selected_paths
+    assert "staging/src/k8s.io/apiserver/pkg/server/config.go" in selected_paths
+    assert "staging/src/k8s.io/apimachinery/pkg/apis/meta/v1/types.go" in selected_paths
+    assert "staging/src/k8s.io/client-go/gentype/fake.go" not in selected_paths
+    assert len([path for path in selected_paths if path.startswith("staging/src/k8s.io/cloud-provider/")]) <= 2
+
+
+@pytest.mark.asyncio
+async def test_selector_v2_prefers_terraform_engine_over_cli_config_noise():
+    service = RemoteFileSelectorService(FakeTerraformGitHubClient())
+
+    result = await service.select_v2("hashicorp", "terraform", top_n=8, candidate_limit=14)
+    selected_paths = [file_info["path"] for file_info in result.key_files]
+
+    assert "internal/terraform/context.go" in selected_paths
+    assert "internal/terraform/evaluate.go" in selected_paths
+    assert "internal/states/state.go" in selected_paths
+    assert "internal/command/meta.go" in selected_paths
+    assert "internal/backend/backend.go" in selected_paths
+    assert "Dockerfile" not in selected_paths[:6]
+    assert len([path for path in selected_paths if path.startswith("internal/command/cliconfig/")]) <= 1
+    assert len([path for path in selected_paths if path.startswith("internal/command/clistate/")]) <= 1
 
 
 @pytest.mark.asyncio

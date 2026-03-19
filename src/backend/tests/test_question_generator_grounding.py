@@ -277,6 +277,48 @@ def test_extract_grounded_tech_candidates_supports_node_backend_and_cpp(monkeypa
     assert "C++" in candidate_names
 
 
+def test_extract_grounded_tech_candidates_prefers_vscode_node_runtime_file_over_package_manifest(monkeypatch):
+    generator = build_generator(monkeypatch)
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/microsoft/vscode",
+        analysis_data={
+            "metadata": {
+                "tech_stack": '{"Node.js": 1.0, "TypeScript": 0.95}'
+            }
+        },
+        code_snippets=[],
+    )
+    selected_files = [
+        {
+            "content": '{"scripts":{"compile":"gulp compile"},"dependencies":{"@github/copilot":"1.0.0"}}',
+            "metadata": {
+                "file_path": "package.json",
+                "language": "json",
+            },
+        },
+        {
+            "content": "export function startup() { return true }\n",
+            "metadata": {
+                "file_path": "src/main.ts",
+                "language": "typescript",
+            },
+        },
+        {
+            "content": "export function configureCommandlineSwitchesSync() { return true }\n",
+            "metadata": {
+                "file_path": "src/vs/code/electron-main/app.ts",
+                "language": "typescript",
+            },
+        },
+    ]
+
+    candidates = generator._extract_grounded_tech_candidates(state, selected_files)
+    node_candidates = [item for item in candidates if item["tech"] == "Node.js"]
+
+    assert node_candidates
+    assert node_candidates[0]["evidence_paths"][0] != "package.json"
+
+
 def test_build_architecture_context_treats_scripts_as_module_files(monkeypatch):
     generator = build_generator(monkeypatch)
     context = generator._build_architecture_context(
@@ -775,6 +817,38 @@ def test_build_architecture_focus_modes_prefers_server_and_client_files_for_web_
     assert "packages/next/src/server/next.ts" in runtime_boundary["files"]
     assert "packages/next/src/client/app-index.tsx" in runtime_boundary["files"]
     assert "packages/next/package.json" in runtime_boundary["files"]
+
+
+def test_build_architecture_focus_modes_prefers_vscode_desktop_runtime_boundaries(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = {
+        "entry_files": [
+            "src/main.ts",
+            "src/vs/code/electron-main/app.ts",
+            "src/vs/workbench/workbench.desktop.main.ts",
+        ],
+        "config_files": ["product.json"],
+        "module_files": [
+            "src/vs/platform/instantiation/common/instantiation.ts",
+            "src/vs/editor/common/model/textModel.ts",
+            "src/vs/workbench/services/extensions/common/extensions.ts",
+        ],
+        "evidence_terms": ["node-runtime", "client-runtime", "app-setup"],
+        "allowed_identifiers": [],
+    }
+
+    focus_modes = generator._build_architecture_focus_modes(context)
+    focus_names = {mode["name"] for mode in focus_modes}
+
+    assert focus_names == {
+        "desktop-runtime-boundary",
+        "desktop-service-boundary",
+        "editor-model-boundary",
+    }
+    runtime_mode = next(mode for mode in focus_modes if mode["name"] == "desktop-runtime-boundary")
+    assert "src/vs/code/electron-main/app.ts" in runtime_mode["files"]
+    assert "src/vs/workbench/workbench.desktop.main.ts" in runtime_mode["files"]
+    assert "product.json" in runtime_mode["files"]
 
 
 def test_build_architecture_context_does_not_classify_src_lib_web_files_as_js_backend(monkeypatch):
@@ -2317,6 +2391,26 @@ def test_fallback_tech_stack_question_avoids_generic_selection_reason(monkeypatc
     assert "create" in question or "AppConfig" in question
 
 
+def test_fallback_tech_stack_question_prefers_package_scripts_over_dependency_names(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "content": '{"scripts":{"compile":"gulp compile","test":"node test.js"},"dependencies":{"@github/copilot":"1.0.0","@anthropic-ai/sandbox-runtime":"1.0.0"}}',
+        "metadata": {
+            "file_path": "package.json",
+        },
+    }
+
+    question = generator._fallback_tech_stack_question(
+        "Node.js",
+        ["package.json"],
+        [snippet],
+    )
+
+    assert "compile" in question
+    assert "@github/copilot" not in question
+    assert "@anthropic-ai/sandbox-runtime" not in question
+
+
 def test_fallback_code_question_prefers_nontrivial_symbol_for_python(monkeypatch):
     generator = build_generator(monkeypatch)
     snippet = {
@@ -2396,6 +2490,45 @@ def test_select_code_analysis_focus_avoids_dunder_only_pick(monkeypatch):
     focus = generator._select_code_analysis_focus(snippet)
 
     assert focus == {"kind": "function", "name": "create"}
+
+
+def test_select_code_analysis_focus_skips_single_letter_class_and_relative_import(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "metadata": {
+            "file_path": "src/vs/code/electron-main/main.ts",
+            "extracted_elements": {
+                "classes": ["C"],
+                "functions": [],
+                "imports": ["../platform/instantiation/common/extensions.js"],
+            },
+        }
+    }
+
+    focus = generator._select_code_analysis_focus(snippet)
+
+    assert focus is None
+
+
+def test_validate_architecture_question_requires_multiple_focus_file_mentions(monkeypatch):
+    generator = build_generator(monkeypatch)
+    architecture_context = {
+        "entry_files": ["src/main.ts", "src/vs/code/electron-main/app.ts"],
+        "config_files": ["product.json"],
+        "module_files": ["src/vs/workbench/workbench.desktop.main.ts"],
+        "focus_files": [
+            "src/main.ts",
+            "src/vs/code/electron-main/app.ts",
+            "src/vs/workbench/workbench.desktop.main.ts",
+        ],
+        "evidence_terms": ["node-runtime", "client-runtime"],
+        "allowed_identifiers": [],
+    }
+
+    assert not generator._validate_architecture_question(
+        "src/main.ts 기준으로 이 저장소가 node/client/runtime 책임을 어떻게 나누고 있는지 설명해주세요.",
+        architecture_context,
+    )
 
 
 def test_architecture_duplicate_detection_considers_python_file_tokens(monkeypatch):
