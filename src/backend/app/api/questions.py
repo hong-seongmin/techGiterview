@@ -21,7 +21,12 @@ from app.core.database import engine, SessionLocal
 router = APIRouter()
 
 QUESTION_GENERATION_EXPERIMENT_ID = "question_generation_v1"
-DEFAULT_GENERATOR_VARIANT = "generator_v1"
+LEGACY_GENERATOR_VARIANT = "generator_v1"
+DEFAULT_GENERATOR_VARIANT = "generator_grounded_prod_v1"
+BEST_CASE_GENERATOR_PROFILE = "best_case_generator_v1"
+CANONICAL_SELECTOR_VARIANT = "selector_v2"
+ANALYSIS_STATUS_FRESH_BEST_CASE = "fresh_best_case"
+ANALYSIS_STATUS_LEGACY_UNVERIFIED = "legacy_unverified"
 
 # 질문 캐시 (variant-aware cache key -> payload)
 question_cache: Dict[str, "QuestionCacheData"] = {}
@@ -100,6 +105,9 @@ class QuestionCacheData(BaseModel):
     selector_variant: str
     generator_variant: str
     provider_id: Optional[str] = None
+    applied_profile: Optional[str] = None
+    analysis_profile_status: str = ANALYSIS_STATUS_LEGACY_UNVERIFIED
+    best_case_guaranteed: bool = False
     original_questions: List[QuestionResponse]  # AI 원본 질문
     parsed_questions: List[QuestionResponse]   # 파싱된 개별 질문
     question_groups: Dict[str, List[str]]      # 그룹별 질문 관계 (parent_id -> [sub_question_ids])
@@ -116,6 +124,26 @@ def _extract_selector_context(analysis_result: Optional[Dict[str, Any]]) -> Tupl
     selector_variant = selector_experiment.get("display_variant") or "selector_v1"
     selector_experiment_id = selector_experiment.get("experiment_id")
     return selector_variant, selector_experiment_id
+
+
+def _resolve_analysis_profile_context(analysis_result: Optional[Dict[str, Any]]) -> Tuple[str, bool]:
+    selector_experiment = (
+        (analysis_result or {})
+        .get("smart_file_analysis", {})
+        .get("selector_experiment", {})
+    )
+    selector_variant = selector_experiment.get("display_variant")
+    best_case_guaranteed = bool(selector_experiment.get("best_case_guaranteed"))
+    analysis_profile_status = selector_experiment.get("analysis_profile_status")
+
+    if (
+        selector_variant == CANONICAL_SELECTOR_VARIANT
+        and best_case_guaranteed
+        and analysis_profile_status == ANALYSIS_STATUS_FRESH_BEST_CASE
+    ):
+        return ANALYSIS_STATUS_FRESH_BEST_CASE, True
+
+    return ANALYSIS_STATUS_LEGACY_UNVERIFIED, False
 
 
 def build_question_cache_key(
@@ -169,6 +197,9 @@ def _save_question_generation_run(
     selector_variant: str,
     generator_variant: str,
     provider_id: Optional[str],
+    applied_profile: Optional[str],
+    analysis_profile_status: str,
+    best_case_guaranteed: bool,
     original_questions: List[QuestionResponse],
     parsed_questions: List[QuestionResponse],
     question_groups: Dict[str, List[str]],
@@ -196,6 +227,9 @@ def _save_question_generation_run(
             run_metadata={
                 "analysis_id": analysis_id,
                 "provider_id": provider_id,
+                "applied_profile": applied_profile,
+                "analysis_profile_status": analysis_profile_status,
+                "best_case_guaranteed": best_case_guaranteed,
             },
         )
         db.add(run)
@@ -213,6 +247,9 @@ def _save_question_generation_run(
                 "selector_variant": selector_variant,
                 "generator_variant": generator_variant,
                 "provider_id": provider_id,
+                "applied_profile": applied_profile,
+                "analysis_profile_status": analysis_profile_status,
+                "best_case_guaranteed": best_case_guaranteed,
                 "generated_question_count": len(original_questions),
                 "parsed_question_count": len(parsed_questions),
                 "latency_ms": latency_ms,
@@ -386,6 +423,32 @@ def parse_compound_question(question: QuestionResponse) -> List[QuestionResponse
     # 4. 처리된 내용을 하나의 질문으로 결합
     cleaned_question = ' '.join(processed_lines).strip().strip('"').strip("'")
     cleaned_question = re.sub(r'\s+', ' ', cleaned_question)
+    cleaned_question = re.sub(
+        r'^다음은 실제 .*?(?:기술면접 )?질문(?:입니다)?[:：]\s*',
+        '',
+        cleaned_question,
+        flags=re.IGNORECASE,
+    ).strip().strip('"').strip("'")
+    cleaned_question = re.sub(
+        r'^(?:실제 )?(?:package\.json|pyproject\.toml|README) 파일(?:의 내용)?(?:을 직접 참조하여)? 생성한 질문(?:입니다)?[:：]\s*',
+        '',
+        cleaned_question,
+        flags=re.IGNORECASE,
+    ).strip().strip('"').strip("'")
+    has_choice_markers = any(
+        re.search(pattern, cleaned_question)
+        for pattern in (
+            r'(?:^|\s)1[.)]\s+',
+            r'(?:^|\s)2[.)]\s+',
+            r'(?:^|\s)[A-D][.)]\s+',
+            r'[①②③④]',
+            r'(?:^|\s)[가나다라][.)]\s+',
+            r'(?:^|\s)-\s+',
+            r'(?:^|\s)•\s+',
+        )
+    )
+    if cleaned_question.startswith("다음 중") and not has_choice_markers:
+        cleaned_question = re.sub(r'^다음 중(?:에서)?\s*', '', cleaned_question).strip()
     
     # 5. 정리된 질문이 유효한지 확인
     if (len(cleaned_question) > 20 and 
@@ -419,6 +482,37 @@ def parse_questions_list(questions: List[QuestionResponse]) -> List[QuestionResp
     return parsed_questions
 
 
+def ensure_unique_question_ids(questions: List[QuestionResponse]) -> List[QuestionResponse]:
+    """
+    모든 질문 ID를 전역 고유 UUID로 재할당하고 parent_question_id 참조도 함께 보정한다.
+
+    interview_questions.id는 전역 unique primary key이므로,
+    분석별로 짧은 난수 ID를 재사용하면 다른 analysis의 질문과 충돌할 수 있다.
+    """
+    id_remap: Dict[str, str] = {}
+    normalized_questions: List[QuestionResponse] = []
+
+    for question in questions:
+        normalized_question = question.model_copy(deep=True)
+        original_id = normalized_question.id or str(uuid.uuid4())
+        new_id = str(uuid.uuid4())
+
+        if original_id not in id_remap:
+            id_remap[original_id] = new_id
+
+        normalized_question.id = new_id
+        normalized_questions.append(normalized_question)
+
+    for question in normalized_questions:
+        if question.parent_question_id:
+            question.parent_question_id = id_remap.get(
+                question.parent_question_id,
+                question.parent_question_id,
+            )
+
+    return normalized_questions
+
+
 class QuestionGenerationResult(BaseModel):
     """질문 생성 결과"""
     success: bool
@@ -428,6 +522,9 @@ class QuestionGenerationResult(BaseModel):
     experiment_id: Optional[str] = None
     selector_variant: Optional[str] = None
     generator_variant: Optional[str] = None
+    applied_profile: Optional[str] = None
+    analysis_profile_status: Optional[str] = None
+    best_case_guaranteed: Optional[bool] = None
 
 
 @router.post("/generate", response_model=QuestionGenerationResult)
@@ -446,6 +543,10 @@ async def generate_questions(
             analysis_id = request.analysis_result["analysis_id"]
 
         selector_variant, selector_experiment_id = _extract_selector_context(request.analysis_result)
+        analysis_profile_status, best_case_guaranteed = _resolve_analysis_profile_context(
+            request.analysis_result
+        )
+        applied_profile = BEST_CASE_GENERATOR_PROFILE
         generator_variant = DEFAULT_GENERATOR_VARIANT
 
         # 이미 생성된 질문이 있는지 확인 (강제 재생성이 아닌 경우)
@@ -464,6 +565,9 @@ async def generate_questions(
                     experiment_id=cache_data.experiment_id,
                     selector_variant=cache_data.selector_variant,
                     generator_variant=cache_data.generator_variant,
+                    applied_profile=cache_data.applied_profile,
+                    analysis_profile_status=cache_data.analysis_profile_status,
+                    best_case_guaranteed=cache_data.best_case_guaranteed,
                 )
 
         started_at = time.perf_counter()
@@ -506,7 +610,7 @@ async def generate_questions(
             ))
 
         # 질문 파싱 처리 (compound question 분리)
-        parsed_questions = parse_questions_list(questions)
+        parsed_questions = ensure_unique_question_ids(parse_questions_list(questions))
 
         # 질문 그룹 관계 생성
         question_groups = create_question_groups(parsed_questions)
@@ -524,6 +628,9 @@ async def generate_questions(
                 selector_variant=selector_variant,
                 generator_variant=generator_variant,
                 provider_id=request.provider_id,
+                applied_profile=applied_profile,
+                analysis_profile_status=analysis_profile_status,
+                best_case_guaranteed=best_case_guaranteed,
                 original_questions=questions,
                 parsed_questions=parsed_questions,
                 question_groups=question_groups,
@@ -538,6 +645,10 @@ async def generate_questions(
                 selector_variant=selector_variant,
                 generator_variant=generator_variant,
                 experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
+                provider_id=request.provider_id,
+                applied_profile=applied_profile,
+                analysis_profile_status=analysis_profile_status,
+                best_case_guaranteed=best_case_guaranteed,
             )
 
             _save_question_generation_run(
@@ -547,6 +658,9 @@ async def generate_questions(
                 selector_variant=selector_variant,
                 generator_variant=generator_variant,
                 provider_id=request.provider_id,
+                applied_profile=applied_profile,
+                analysis_profile_status=analysis_profile_status,
+                best_case_guaranteed=best_case_guaranteed,
                 original_questions=questions,
                 parsed_questions=parsed_questions,
                 question_groups=question_groups,
@@ -560,6 +674,9 @@ async def generate_questions(
                 experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
                 selector_variant=selector_variant,
                 generator_variant=generator_variant,
+                applied_profile=applied_profile,
+                analysis_profile_status=analysis_profile_status,
+                best_case_guaranteed=best_case_guaranteed,
             )
 
         return QuestionGenerationResult(
@@ -569,6 +686,9 @@ async def generate_questions(
             experiment_id=QUESTION_GENERATION_EXPERIMENT_ID,
             selector_variant=selector_variant,
             generator_variant=generator_variant,
+            applied_profile=applied_profile,
+            analysis_profile_status=analysis_profile_status,
+            best_case_guaranteed=best_case_guaranteed,
         )
         
     except Exception as e:
@@ -594,6 +714,9 @@ async def get_questions(analysis_id: str):
             "created_at": cache_data.created_at,
             "selector_variant": cache_data.selector_variant,
             "generator_variant": cache_data.generator_variant,
+            "applied_profile": cache_data.applied_profile,
+            "analysis_profile_status": cache_data.analysis_profile_status,
+            "best_case_guaranteed": cache_data.best_case_guaranteed,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -614,6 +737,9 @@ async def get_question_groups(analysis_id: str):
             "total_groups": len(cache_data.question_groups),
             "selector_variant": cache_data.selector_variant,
             "generator_variant": cache_data.generator_variant,
+            "applied_profile": cache_data.applied_profile,
+            "analysis_profile_status": cache_data.analysis_profile_status,
+            "best_case_guaranteed": cache_data.best_case_guaranteed,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -652,6 +778,9 @@ async def get_cache_status():
                 "created_at": cache_data.created_at,
                 "selector_variant": cache_data.selector_variant,
                 "generator_variant": cache_data.generator_variant,
+                "applied_profile": cache_data.applied_profile,
+                "analysis_profile_status": cache_data.analysis_profile_status,
+                "best_case_guaranteed": cache_data.best_case_guaranteed,
             }
         
         return {
@@ -672,7 +801,6 @@ async def get_questions_by_analysis(analysis_id: str):
         cache_data = get_question_cache_entry(analysis_id)
         if cache_data:
             print(f"[QUESTIONS] Found questions in memory cache for {analysis_id}")
-
             return QuestionGenerationResult(
                 success=True,
                 questions=cache_data.parsed_questions,
@@ -680,6 +808,9 @@ async def get_questions_by_analysis(analysis_id: str):
                 experiment_id=cache_data.experiment_id,
                 selector_variant=cache_data.selector_variant,
                 generator_variant=cache_data.generator_variant,
+                applied_profile=cache_data.applied_profile,
+                analysis_profile_status=cache_data.analysis_profile_status,
+                best_case_guaranteed=cache_data.best_case_guaranteed,
             )
         
         # 2. 메모리 캐시에 없으면 DB에서 조회
@@ -697,6 +828,9 @@ async def get_questions_by_analysis(analysis_id: str):
                 selector_variant=cache_metadata.get("selector_variant", "selector_v1"),
                 generator_variant=cache_metadata.get("generator_variant", DEFAULT_GENERATOR_VARIANT),
                 provider_id=cache_metadata.get("provider_id"),
+                applied_profile=cache_metadata.get("applied_profile"),
+                analysis_profile_status=cache_metadata.get("analysis_profile_status", ANALYSIS_STATUS_LEGACY_UNVERIFIED),
+                best_case_guaranteed=cache_metadata.get("best_case_guaranteed", False),
             )
             
             return QuestionGenerationResult(
@@ -706,6 +840,9 @@ async def get_questions_by_analysis(analysis_id: str):
                 experiment_id=cache_metadata.get("experiment_id", QUESTION_GENERATION_EXPERIMENT_ID),
                 selector_variant=cache_metadata.get("selector_variant", "selector_v1"),
                 generator_variant=cache_metadata.get("generator_variant", DEFAULT_GENERATOR_VARIANT),
+                applied_profile=cache_metadata.get("applied_profile"),
+                analysis_profile_status=cache_metadata.get("analysis_profile_status", ANALYSIS_STATUS_LEGACY_UNVERIFIED),
+                best_case_guaranteed=cache_metadata.get("best_case_guaranteed", False),
             )
         
         # 3. 메모리 캐시와 DB 모두에 없음
@@ -757,6 +894,9 @@ async def debug_question_cache():
                 "parsed_question_count": len(cache_data.parsed_questions),
                 "selector_variant": cache_data.selector_variant,
                 "generator_variant": cache_data.generator_variant,
+                "applied_profile": cache_data.applied_profile,
+                "analysis_profile_status": cache_data.analysis_profile_status,
+                "best_case_guaranteed": cache_data.best_case_guaranteed,
                 "question_types": list(set(q.type for q in cache_data.parsed_questions))
             }
             for cache_key, cache_data in question_cache.items()
@@ -788,6 +928,9 @@ async def debug_original_questions(analysis_id: str):
             "groups_count": len(cache_data.question_groups),
             "selector_variant": cache_data.selector_variant,
             "generator_variant": cache_data.generator_variant,
+            "applied_profile": cache_data.applied_profile,
+            "analysis_profile_status": cache_data.analysis_profile_status,
+            "best_case_guaranteed": cache_data.best_case_guaranteed,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -873,6 +1016,9 @@ async def debug_question_cache():
                 "created_at": cache_data.created_at,
                 "selector_variant": cache_data.selector_variant,
                 "generator_variant": cache_data.generator_variant,
+                "applied_profile": cache_data.applied_profile,
+                "analysis_profile_status": cache_data.analysis_profile_status,
+                "best_case_guaranteed": cache_data.best_case_guaranteed,
             }
             for cache_key, cache_data in question_cache.items()
         ]
@@ -912,8 +1058,11 @@ async def _load_questions_from_db(analysis_id: str) -> Tuple[List[QuestionRespon
             cache_metadata: Dict[str, Any] = {
                 "experiment_id": QUESTION_GENERATION_EXPERIMENT_ID,
                 "selector_variant": "selector_v1",
-                "generator_variant": DEFAULT_GENERATOR_VARIANT,
+                "generator_variant": LEGACY_GENERATOR_VARIANT,
                 "provider_id": None,
+                "applied_profile": None,
+                "analysis_profile_status": ANALYSIS_STATUS_LEGACY_UNVERIFIED,
+                "best_case_guaranteed": False,
             }
             for row in result:
                 context_value = row[6]
@@ -930,8 +1079,14 @@ async def _load_questions_from_db(analysis_id: str) -> Tuple[List[QuestionRespon
                     cache_metadata = {
                         "experiment_id": experiment_meta.get("experiment_id", QUESTION_GENERATION_EXPERIMENT_ID),
                         "selector_variant": experiment_meta.get("selector_variant", "selector_v1"),
-                        "generator_variant": experiment_meta.get("generator_variant", DEFAULT_GENERATOR_VARIANT),
+                        "generator_variant": experiment_meta.get("generator_variant", LEGACY_GENERATOR_VARIANT),
                         "provider_id": experiment_meta.get("provider_id"),
+                        "applied_profile": experiment_meta.get("applied_profile"),
+                        "analysis_profile_status": experiment_meta.get(
+                            "analysis_profile_status",
+                            ANALYSIS_STATUS_LEGACY_UNVERIFIED,
+                        ),
+                        "best_case_guaranteed": experiment_meta.get("best_case_guaranteed", False),
                     }
 
                 # expected_points JSON 파싱
@@ -965,8 +1120,11 @@ async def _load_questions_from_db(analysis_id: str) -> Tuple[List[QuestionRespon
         return [], {
             "experiment_id": QUESTION_GENERATION_EXPERIMENT_ID,
             "selector_variant": "selector_v1",
-            "generator_variant": DEFAULT_GENERATOR_VARIANT,
+            "generator_variant": LEGACY_GENERATOR_VARIANT,
             "provider_id": None,
+            "applied_profile": None,
+            "analysis_profile_status": ANALYSIS_STATUS_LEGACY_UNVERIFIED,
+            "best_case_guaranteed": False,
         }
 
 
@@ -978,6 +1136,9 @@ async def _restore_questions_to_cache(
     selector_variant: str = "selector_v1",
     generator_variant: str = DEFAULT_GENERATOR_VARIANT,
     provider_id: Optional[str] = None,
+    applied_profile: Optional[str] = None,
+    analysis_profile_status: str = ANALYSIS_STATUS_LEGACY_UNVERIFIED,
+    best_case_guaranteed: bool = False,
 ):
     """DB에서 가져온 질문들을 메모리 캐시에 복원"""
     try:
@@ -992,6 +1153,9 @@ async def _restore_questions_to_cache(
             selector_variant=selector_variant,
             generator_variant=generator_variant,
             provider_id=provider_id,
+            applied_profile=applied_profile,
+            analysis_profile_status=analysis_profile_status,
+            best_case_guaranteed=best_case_guaranteed,
             original_questions=questions,  # DB에서 가져온 질문들을 원본으로 처리
             parsed_questions=questions,    # 이미 파싱된 상태로 간주
             question_groups=question_groups,
@@ -1015,6 +1179,9 @@ async def _save_questions_to_db(
     generator_variant: str,
     experiment_id: str,
     provider_id: Optional[str] = None,
+    applied_profile: Optional[str] = None,
+    analysis_profile_status: str = ANALYSIS_STATUS_LEGACY_UNVERIFIED,
+    best_case_guaranteed: bool = False,
 ):
     """생성된 질문들을 데이터베이스에 저장"""
     try:
@@ -1048,6 +1215,9 @@ async def _save_questions_to_db(
                             "selector_variant": selector_variant,
                             "generator_variant": generator_variant,
                             "provider_id": provider_id,
+                            "applied_profile": applied_profile,
+                            "analysis_profile_status": analysis_profile_status,
+                            "best_case_guaranteed": best_case_guaranteed,
                         }
                     }),
                     "created_at": current_time

@@ -132,7 +132,19 @@ async def start_interview(request: InterviewStartRequest, db: Session = Depends(
                         category=question_data.type,  # QuestionResponse uses 'type' not 'category'
                         difficulty=question_data.difficulty,
                         question_text=question_data.question,
-                        context={"original_data": question_data.dict(), "original_id": question_data.id}
+                        context={
+                            "original_data": question_data.dict(),
+                            "original_id": question_data.id,
+                            "experiment": {
+                                "experiment_id": cache_data.experiment_id,
+                                "selector_variant": cache_data.selector_variant,
+                                "generator_variant": cache_data.generator_variant,
+                                "provider_id": cache_data.provider_id,
+                                "applied_profile": cache_data.applied_profile,
+                                "analysis_profile_status": cache_data.analysis_profile_status,
+                                "best_case_guaranteed": cache_data.best_case_guaranteed,
+                            },
+                        }
                     )
                     db.add(db_question)
         

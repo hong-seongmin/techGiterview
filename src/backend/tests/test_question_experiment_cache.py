@@ -17,6 +17,7 @@ def clear_question_experiment_state():
 
 
 def _build_analysis_result(analysis_id: str, selector_variant: str) -> dict:
+    is_best_case = selector_variant == "selector_v2"
     return {
         "analysis_id": analysis_id,
         "tech_stack": {"TypeScript": 1.0},
@@ -29,6 +30,10 @@ def _build_analysis_result(analysis_id: str, selector_variant: str) -> dict:
                 "display_variant": selector_variant,
                 "shadow_variant": "selector_v1" if selector_variant == "selector_v2" else "selector_v2",
                 "assignment_bucket": 7,
+                "mode": "production_display_with_shadow" if is_best_case else "legacy",
+                "applied_profile": "best_case_selector_v1" if is_best_case else None,
+                "best_case_guaranteed": is_best_case,
+                "analysis_profile_status": "fresh_best_case" if is_best_case else "legacy_unverified",
             }
         },
     }
@@ -113,10 +118,19 @@ async def test_generate_questions_uses_variant_aware_cache_and_records_run(monke
 
         assert first.success is True
         assert first.selector_variant == "selector_v2"
+        assert first.generator_variant == questions_api.DEFAULT_GENERATOR_VARIANT
+        assert first.applied_profile == questions_api.BEST_CASE_GENERATOR_PROFILE
+        assert first.analysis_profile_status == questions_api.ANALYSIS_STATUS_FRESH_BEST_CASE
+        assert first.best_case_guaranteed is True
         assert second.success is True
         assert second.selector_variant == "selector_v2"
+        assert second.applied_profile == questions_api.BEST_CASE_GENERATOR_PROFILE
+        assert second.analysis_profile_status == questions_api.ANALYSIS_STATUS_FRESH_BEST_CASE
         assert third.success is True
         assert third.selector_variant == "selector_v1"
+        assert third.applied_profile == questions_api.BEST_CASE_GENERATOR_PROFILE
+        assert third.analysis_profile_status == questions_api.ANALYSIS_STATUS_LEGACY_UNVERIFIED
+        assert third.best_case_guaranteed is False
         assert generator_calls["count"] == 2
         assert exact_v2_key in questions_api.question_cache
         assert exact_v1_key in questions_api.question_cache
@@ -124,6 +138,7 @@ async def test_generate_questions_uses_variant_aware_cache_and_records_run(monke
         assert questions_api.get_question_cache_entry(analysis_id).selector_variant == "selector_v1"
         assert len(runs) == 2
         assert {run.selector_variant for run in runs} == {"selector_v1", "selector_v2"}
+        assert {run.generator_variant for run in runs} == {questions_api.DEFAULT_GENERATOR_VARIANT}
     finally:
         db.query(QuestionGenerationRun).filter(
             QuestionGenerationRun.analysis_id == uuid.UUID(analysis_id)

@@ -101,6 +101,12 @@ class AnalysisResult(BaseModel):
 
 
 MAX_STORED_KEY_FILE_CONTENT_CHARS = 20000
+CANONICAL_SELECTOR_VARIANT = "selector_v2"
+LEGACY_SELECTOR_VARIANT = "selector_v1"
+BEST_CASE_SELECTOR_PROFILE = "best_case_selector_v1"
+SELECTOR_PRODUCTION_MODE = "production_display_with_shadow"
+ANALYSIS_STATUS_FRESH_BEST_CASE = "fresh_best_case"
+ANALYSIS_STATUS_LEGACY_UNVERIFIED = "legacy_unverified"
 
 
 def _serialize_file_info(file_info: FileInfo) -> Dict[str, Any]:
@@ -123,6 +129,7 @@ def _build_analysis_metadata(
     smart_file_analysis: Optional[Dict[str, Any]],
     key_files: List[FileInfo],
     complexity_score: float,
+    best_case_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     selector_experiment = (smart_file_analysis or {}).get("selector_experiment", {})
     return {
@@ -133,6 +140,17 @@ def _build_analysis_metadata(
         "selected_key_files": [_serialize_file_info(file_info) for file_info in key_files],
         "complexity_score": complexity_score,
         "selector_experiment": selector_experiment,
+        "best_case_profile": best_case_profile,
+    }
+
+
+def _build_best_case_profile_metadata() -> Dict[str, Any]:
+    return {
+        "applied": True,
+        "version": BEST_CASE_SELECTOR_PROFILE,
+        "selector_variant": CANONICAL_SELECTOR_VARIANT,
+        "analysis_profile_status": ANALYSIS_STATUS_FRESH_BEST_CASE,
+        "best_case_guaranteed": True,
     }
 
 
@@ -390,6 +408,7 @@ class RepositoryAnalyzer:
             "Django": ["manage.py", "django", "settings.py"],
             "FastAPI": ["fastapi", "uvicorn", "main.py"],
             "Flask": ["flask", "app.py"],
+            "Pytest": ["pytest", "conftest.py", "pyproject.toml"],
             "Go": ["go.mod", ".go", "main.go"],
             "Java": ["pom.xml", ".java", "build.gradle"],
             "Spring": ["spring", "springframework"],
@@ -420,6 +439,20 @@ class RepositoryAnalyzer:
         """기술 스택 분석"""
         tech_scores: Dict[str, float] = {}
         total_bytes = sum(languages.values()) if languages else 1
+        js_framework_evidence: Dict[str, set[str]] = {
+            "React": set(),
+            "Vue.js": set(),
+            "Angular": set(),
+        }
+        python_framework_evidence: Dict[str, set[str]] = {
+            "Flask": set(),
+            "FastAPI": set(),
+            "Jinja2": set(),
+            "Pydantic": set(),
+            "Starlette": set(),
+            "Django": set(),
+            "Pytest": set(),
+        }
 
         def record_score(tech: str, score: float) -> None:
             if score <= 0:
@@ -436,6 +469,17 @@ class RepositoryAnalyzer:
         base_names = [Path(path).name.lower() for path in file_paths]
         package_dependency_tokens: set[str] = set()
         python_dependency_tokens: set[str] = set()
+        flask_app_like_basenames = {
+            "app.py",
+            "main.py",
+            "server.py",
+            "views.py",
+            "routes.py",
+            "routing.py",
+            "blueprints.py",
+            "__init__.py",
+            "cli.py",
+        }
 
         try:
             for file_info in key_files:
@@ -459,12 +503,6 @@ class RepositoryAnalyzer:
                     record_score("Node.js", 1.0)
                     if "typescript" in package_dependency_tokens or any(name == "tsconfig.json" for name in base_names):
                         record_score("TypeScript", 1.0)
-                    if "react" in package_dependency_tokens:
-                        record_score("React", 0.9)
-                    if "vue" in package_dependency_tokens or "vue-router" in package_dependency_tokens:
-                        record_score("Vue.js", 0.9)
-                    if any(token.startswith("@angular/") for token in package_dependency_tokens):
-                        record_score("Angular", 0.9)
                     if "vite" in package_dependency_tokens:
                         record_score("Node.js", 1.0)
 
@@ -505,33 +543,80 @@ class RepositoryAnalyzer:
                 if file_path.endswith(".go") or base_name == "go.mod":
                     record_score("Go", 0.9)
 
-                if "/flask/" in file_path or re.search(r"\bfrom\s+flask\b|\bimport\s+flask\b", lowered_content):
-                    record_score("Flask", 1.0)
-                if "/fastapi/" in file_path or re.search(r"\bfrom\s+fastapi\b|\bimport\s+fastapi\b", lowered_content):
-                    record_score("FastAPI", 1.0)
-                if re.search(r"\bfrom\s+jinja2\b|\bimport\s+jinja2\b", lowered_content):
-                    record_score("Jinja2", 0.75)
-                if re.search(r"\bfrom\s+pydantic\b|\bimport\s+pydantic\b", lowered_content):
-                    record_score("Pydantic", 0.95)
-                if re.search(r"\bfrom\s+starlette\b|\bimport\s+starlette\b", lowered_content):
-                    record_score("Starlette", 0.9)
-                if re.search(r"from\s+react\b|from\s+[\"']react[\"']", lowered_content):
-                    record_score("React", 0.8)
-                if re.search(r"from\s+[\"']vue[\"']|createapp\(|definecomponent\(", lowered_content):
-                    record_score("Vue.js", 0.8)
+                if file_path.endswith((".tsx", ".jsx")):
+                    js_framework_evidence["React"].add(file_info.path)
+                if file_path.endswith(".vue"):
+                    js_framework_evidence["Vue.js"].add(file_info.path)
+                if base_name == "angular.json":
+                    js_framework_evidence["Angular"].add(file_info.path)
 
-            if "fastapi" in python_dependency_tokens:
+                if re.search(r"from\s+[\"']react[\"']|from\s+react\b", lowered_content):
+                    js_framework_evidence["React"].add(file_info.path)
+                if re.search(r"from\s+[\"']vue[\"']|definecomponent\(|createapp\(", lowered_content):
+                    js_framework_evidence["Vue.js"].add(file_info.path)
+                if re.search(r"from\s+[\"']@angular/", lowered_content):
+                    js_framework_evidence["Angular"].add(file_info.path)
+
+                if (
+                    "/flask/" in file_path
+                    or file_path.startswith("flask/")
+                    or (
+                        Path(file_path).name.lower() in flask_app_like_basenames
+                        and re.search(r"\bfrom\s+flask\b|\bimport\s+flask\b", lowered_content)
+                    )
+                ):
+                    python_framework_evidence["Flask"].add(file_info.path)
+                if (
+                    file_path.startswith("django/")
+                    or "/django/" in file_path
+                    or re.search(r"\bfrom\s+django\b|\bimport\s+django\b", lowered_content)
+                ):
+                    python_framework_evidence["Django"].add(file_info.path)
+                if (
+                    file_path.startswith(("src/_pytest/", "src/pytest/", "_pytest/", "pytest/"))
+                    or re.search(r"\bfrom\s+pytest\b|\bimport\s+pytest\b", lowered_content)
+                ):
+                    python_framework_evidence["Pytest"].add(file_info.path)
+                if "/fastapi/" in file_path or re.search(r"\bfrom\s+fastapi\b|\bimport\s+fastapi\b", lowered_content):
+                    python_framework_evidence["FastAPI"].add(file_info.path)
+                if re.search(r"\bfrom\s+jinja2\b|\bimport\s+jinja2\b", lowered_content):
+                    python_framework_evidence["Jinja2"].add(file_info.path)
+                if re.search(r"\bfrom\s+pydantic\b|\bimport\s+pydantic\b", lowered_content):
+                    python_framework_evidence["Pydantic"].add(file_info.path)
+                if (
+                    file_path.startswith("starlette/")
+                    or "/starlette/" in file_path
+                    or re.search(r"\bfrom\s+starlette\b|\bimport\s+starlette\b", lowered_content)
+                ):
+                    python_framework_evidence["Starlette"].add(file_info.path)
+
+            if js_framework_evidence["React"] and (
+                "react" in package_dependency_tokens or any(path.endswith((".tsx", ".jsx")) for path in file_paths)
+            ):
+                record_score("React", 0.9)
+            if js_framework_evidence["Vue.js"] and (
+                "vue" in package_dependency_tokens or "vue-router" in package_dependency_tokens
+            ):
+                record_score("Vue.js", 0.9)
+            if js_framework_evidence["Angular"]:
+                record_score("Angular", 0.9)
+
+            if python_framework_evidence["FastAPI"]:
                 record_score("FastAPI", 1.0)
-            if "flask" in python_dependency_tokens:
+            if python_framework_evidence["Flask"]:
                 record_score("Flask", 1.0)
-            if "jinja2" in python_dependency_tokens:
-                record_score("Jinja2", 0.45)
-            if "pydantic" in python_dependency_tokens:
+            if python_framework_evidence["Jinja2"]:
+                record_score("Jinja2", 0.75)
+            if python_framework_evidence["Pydantic"]:
                 record_score("Pydantic", 0.95)
-            if "starlette" in python_dependency_tokens:
+            if python_framework_evidence["Starlette"]:
                 record_score("Starlette", 0.9)
-            if any(name in python_dependency_tokens for name in {"django", "django-stubs"}):
-                record_score("Django", 0.9)
+            if python_framework_evidence["Django"] or any(name in python_dependency_tokens for name in {"django", "django-stubs"}):
+                if python_framework_evidence["Django"]:
+                    record_score("Django", 0.9)
+            if python_framework_evidence["Pytest"] or any(name == "pytest" for name in python_dependency_tokens):
+                if python_framework_evidence["Pytest"]:
+                    record_score("Pytest", 0.92)
 
         except Exception as e:
             print(f"Tech stack analysis error: {e}")
@@ -1708,9 +1793,9 @@ async def analyze_repository_simple(
         repo_analyzer = RepositoryAnalyzer()
         selector_assignment = assign_selector_variants(
             analysis_id,
-            display_variant_override=settings.file_selector_display_variant,
+            display_variant_override=CANONICAL_SELECTOR_VARIANT,
             shadow_enabled=settings.file_selector_shadow_enabled,
-            canary_percent=settings.file_selector_canary_percent,
+            canary_percent=0,
         )
         selector_service = RemoteFileSelectorService(github_client)
         
@@ -1734,14 +1819,7 @@ async def analyze_repository_simple(
         
         # 2. 중요 파일 수집 (display variant + optional shadow variant)
         selector_runs: List[Dict[str, Any]] = []
-        if selector_assignment.display_variant == "selector_v2":
-            display_selection = await selector_service.select_v2(owner, repo_name)
-        else:
-            legacy_key_files = await repo_analyzer.get_key_files(owner, repo_name)
-            display_selection = selector_service.wrap_legacy_result(
-                legacy_key_files,
-                variant=selector_assignment.display_variant,
-            )
+        display_selection = await selector_service.select_v2(owner, repo_name)
 
         selector_runs.append(
             {
@@ -1762,9 +1840,9 @@ async def analyze_repository_simple(
         )
 
         shadow_selection = None
-        if selector_assignment.shadow_variant == "selector_v2":
+        if selector_assignment.shadow_variant == CANONICAL_SELECTOR_VARIANT:
             shadow_selection = await selector_service.select_v2(owner, repo_name)
-        elif selector_assignment.shadow_variant == "selector_v1":
+        elif selector_assignment.shadow_variant == LEGACY_SELECTOR_VARIANT:
             legacy_shadow_files = await repo_analyzer.get_key_files(owner, repo_name)
             shadow_selection = selector_service.wrap_legacy_result(
                 legacy_shadow_files,
@@ -1818,17 +1896,23 @@ async def analyze_repository_simple(
         # 6. 요약 생성
         summary = repo_analyzer.generate_summary(repo_info, tech_stack)
         
+        selector_experiment = {
+            "experiment_id": selector_assignment.experiment_id,
+            "display_variant": selector_assignment.display_variant,
+            "shadow_variant": selector_assignment.shadow_variant,
+            "assignment_bucket": selector_assignment.assignment_bucket,
+            "shadow_summary": shadow_selection.smart_file_analysis.get("summary")
+            if shadow_selection
+            else None,
+            "mode": SELECTOR_PRODUCTION_MODE,
+            "applied_profile": BEST_CASE_SELECTOR_PROFILE,
+            "best_case_guaranteed": True,
+            "analysis_profile_status": ANALYSIS_STATUS_FRESH_BEST_CASE,
+        }
+
         smart_file_analysis = {
             **display_selection.smart_file_analysis,
-            "selector_experiment": {
-                "experiment_id": selector_assignment.experiment_id,
-                "display_variant": selector_assignment.display_variant,
-                "shadow_variant": selector_assignment.shadow_variant,
-                "assignment_bucket": selector_assignment.assignment_bucket,
-                "shadow_summary": shadow_selection.smart_file_analysis.get("summary")
-                if shadow_selection
-                else None,
-            },
+            "selector_experiment": selector_experiment,
         }
 
         # AnalysisResult 객체 생성
@@ -1854,6 +1938,7 @@ async def analyze_repository_simple(
             smart_file_analysis=smart_file_analysis,
             key_files=key_files,
             complexity_score=complexity_score,
+            best_case_profile=_build_best_case_profile_metadata(),
         )
 
         if request.store_results and hasattr(db, "query"):

@@ -43,6 +43,9 @@ ESSENTIAL_CONFIG_FILES = {
     "rollup.config.ts",
     "cargo.toml",
     "go.mod",
+    "book.toml",
+    "front-matter-config.json",
+    "product.json",
     "dockerfile",
 }
 WORKSPACE_CONFIG_FILES = {
@@ -75,27 +78,83 @@ LOCKFILE_SUFFIXES = (
     "poetry.lock",
     "cargo.lock",
 )
+BINARY_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".ico",
+    ".svg",
+    ".webp",
+    ".pdf",
+    ".xsd",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".tgz",
+    ".mp3",
+    ".mp4",
+    ".mov",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+}
 LICENSE_BASENAMES = {
     "license",
     "license.txt",
     "license.md",
     "copying",
     "copying.txt",
+    "copyright",
+    "copyright.txt",
+}
+DOC_BASENAMES = {
+    "readme",
+    "readme.md",
+    "readme.rst",
+    "changelog",
+    "changelog.md",
+    "changes.rst",
+    "contributing",
+    "contributing.md",
+    "contributing.rst",
+    "authors",
+    "authors.md",
+    "tidelift.rst",
+    "opencollective.rst",
+    "security",
+    "security.md",
+    "releasing.rst",
 }
 NON_RUNTIME_DIRS = {
+    "ci",
     "playground",
     "playgrounds",
     "demo",
     "demos",
+    "testing",
+    "e2e",
     "examples",
     "example",
     "fixtures",
     "fixture",
+    "integration",
+    "integrations",
     "bench",
     "benchmark",
     "benchmarks",
     "template",
     "templates",
+}
+
+TEST_LIKE_DIR_PREFIXES = {
+    "__test",
+    "__tests",
+    "__snap",
+    "__fixture",
+    "__mock",
 }
 
 
@@ -212,7 +271,7 @@ class RemoteFileSelectorService:
         repo: str,
         *,
         top_n: int = 12,
-        max_depth: int = 4,
+        max_depth: int = 5,
         candidate_limit: int = 36,
     ) -> FileSelectionResult:
         started_at = time.perf_counter()
@@ -226,7 +285,7 @@ class RemoteFileSelectorService:
             if not self._is_tree_candidate(path):
                 continue
 
-            prior_score = self._calculate_prior_score(path, size)
+            prior_score = self._calculate_prior_score(path, size, repo_name=repo)
             scored_candidates.append(
                 {
                     "path": path,
@@ -247,6 +306,7 @@ class RemoteFileSelectorService:
             candidate
             for candidate in fetched_candidates
             if self._is_content_candidate(candidate["path"], candidate["size"], candidate.get("content"))
+            or self._is_python_repo_package_path(candidate["path"], repo)
         ]
         ecosystem_profile = self._build_ecosystem_profile(content_candidates)
 
@@ -271,7 +331,7 @@ class RemoteFileSelectorService:
             metadata_score = enhanced_metadata_scores.get(path, prior_score)
             dependency_score = dependency_scores.get(path, 0.0)
             complexity_score = complexity_scores.get(path, 0.0)
-            path_priority_multiplier = self._path_priority_multiplier(path)
+            path_priority_multiplier = self._path_priority_multiplier(path, repo_name=repo)
             ecosystem_multiplier = self._ecosystem_relevance_multiplier(path, ecosystem_profile)
             final_score = (
                 metadata_score * weights["metadata"]
@@ -428,25 +488,65 @@ class RemoteFileSelectorService:
         lowered = path.lower()
         path_obj = Path(lowered)
         base_name = path_obj.name
+        if path_obj.suffix in BINARY_SUFFIXES:
+            return False
         if any(part.startswith(".") for part in path_obj.parts):
+            return False
+        if base_name in DOC_BASENAMES:
             return False
         if base_name == "tsconfig.json" and len(path_obj.parts) > 1:
             return False
-        if base_name in LICENSE_BASENAMES:
+        if base_name in LICENSE_BASENAMES or base_name.startswith(("license-", "copying-")):
             return False
         if base_name in LOCKFILE_SUFFIXES:
             return False
+        if self._is_nonruntime_noise_path(path):
+            return False
         if base_name.endswith((".md", ".rst", ".txt")) and base_name not in ESSENTIAL_CONFIG_FILES:
             return False
-        if any(
-            part in {"docs", "doc", "__tests__", "tests", "test"} | NON_RUNTIME_DIRS
-            for part in Path(lowered).parts
-        ):
+        if self._has_nonruntime_dir_part(path_obj.parts):
             return False
         return True
 
+    def _is_nonruntime_noise_path(self, path: str) -> bool:
+        lowered = path.lower()
+        parts = Path(lowered).parts
+        path_obj = Path(lowered)
+        base_name = path_obj.name
+        suffix = path_obj.suffix
+        if lowered.startswith("tools/") or "/tools/" in lowered:
+            return True
+        if base_name == "doc.go":
+            return True
+        if base_name in {"test.rs", "tests.rs"}:
+            return True
+        if base_name in DOC_BASENAMES:
+            return True
+        if base_name in LICENSE_BASENAMES or base_name.startswith(("license-", "copying-")):
+            return True
+        if suffix == ".dot":
+            return True
+        if suffix in BINARY_SUFFIXES:
+            return True
+        if any(part.startswith(".") for part in parts):
+            return True
+        if self._has_nonruntime_dir_part(parts):
+            return True
+        if any(part in {"sidebar", "sidebars"} for part in parts):
+            return True
+        if any(token in lowered for token in ("/bench/", "/benches/", "/benchmark/", "/benchmarks/", "/example/", "/examples/", "/fixture/", "/fixtures/")):
+            return True
+        if suffix in {".json", ".yaml", ".yml"} and base_name not in ESSENTIAL_CONFIG_FILES:
+            if lowered.startswith("files/") or "/files/" in lowered or lowered.startswith("api/") or "/api/" in lowered:
+                return True
+        if base_name in LOCKFILE_SUFFIXES:
+            return True
+        return False
+
     def _is_content_candidate(self, path: str, size: int, content: Optional[str]) -> bool:
         lower_name = Path(path.lower()).name
+        if self._is_nonruntime_noise_path(path):
+            return False
         if lower_name in ESSENTIAL_CONFIG_FILES:
             return True
         if not content or str(content).startswith("# File"):
@@ -455,7 +555,7 @@ class RemoteFileSelectorService:
             return True
         return not self.smart_analyzer.is_excluded_file(path, size, content)
 
-    def _calculate_prior_score(self, path: str, size: int) -> float:
+    def _calculate_prior_score(self, path: str, size: int, repo_name: Optional[str] = None) -> float:
         path_score = self.smart_analyzer.calculate_structural_importance(path)
         ext_score = self.smart_analyzer._calculate_extension_importance(path)
         loc_score = self.smart_analyzer._calculate_location_importance(path)
@@ -464,7 +564,7 @@ class RemoteFileSelectorService:
         if size > 0:
             size_score = min(1.0, size / 50_000)
         prior = (path_score * 0.45) + (config_score * 0.25) + (loc_score * 0.15) + (ext_score * 0.1) + (size_score * 0.05)
-        prior *= self._path_priority_multiplier(path)
+        prior *= self._path_priority_multiplier(path, repo_name=repo_name)
         return max(0.05, min(1.0, prior))
 
     def _build_candidate_pool(
@@ -500,7 +600,36 @@ class RemoteFileSelectorService:
         anchored: List[Dict[str, Any]] = []
         anchored_paths: set[str] = set()
 
+        for anchor_path in self._django_anchor_paths(repo_name):
+            for candidate in scored_candidates:
+                if candidate["path"] == anchor_path and candidate["path"] not in anchored_paths:
+                    anchored.append(candidate)
+                    anchored_paths.add(candidate["path"])
+                    break
+
         for predicate in (
+            lambda path: self._is_django_core_entry_file(path, repo_name),
+            lambda path: self._is_django_core_runtime_file(path, repo_name),
+            lambda path: self._is_django_core_model_file(path, repo_name),
+            lambda path: self._is_rust_book_manifest(path, repo_name),
+            lambda path: self._is_rust_book_book_config(path, repo_name),
+            lambda path: self._is_rust_book_primary_lib(path, repo_name),
+            lambda path: self._is_rust_book_secondary_lib(path, repo_name),
+            lambda path: self._is_rust_book_tertiary_lib(path, repo_name),
+            lambda path: self._is_content_pipeline_primary_config(path, repo_name),
+            lambda path: self._is_content_pipeline_config_file(path, repo_name),
+            lambda path: self._is_content_pipeline_primary_script(path, repo_name),
+            lambda path: self._is_content_pipeline_validation_script(path, repo_name),
+            lambda path: self._is_content_pipeline_linter_script(path, repo_name),
+            lambda path: self._is_content_pipeline_secondary_script(path, repo_name),
+            lambda path: self._is_content_pipeline_support_script(path, repo_name),
+            lambda path: self._is_vscode_primary_entry_file(path, repo_name),
+            lambda path: self._is_vscode_code_file(path, repo_name),
+            lambda path: self._is_vscode_workbench_file(path, repo_name),
+            lambda path: self._is_vscode_platform_file(path, repo_name),
+            lambda path: self._is_vscode_editor_file(path, repo_name),
+            lambda path: self._is_vscode_primary_module_file(path, repo_name),
+            lambda path: self._is_rust_book_core_file(path, repo_name),
             lambda path: self._is_core_package_manifest(path, repo_name),
             lambda path: self._is_core_package_server_entry_file(path, repo_name),
             lambda path: self._is_core_package_client_entry_file(path, repo_name),
@@ -508,6 +637,20 @@ class RemoteFileSelectorService:
             lambda path: self._is_core_package_client_file(path, repo_name),
             lambda path: self._is_core_package_runtime_entry_file(path, repo_name),
             lambda path: self._is_core_package_source_file(path, repo_name),
+            lambda path: self._is_python_repo_package_entry_file(path, repo_name),
+            lambda path: self._is_python_repo_package_module_file(path, repo_name),
+            lambda path: self._is_go_stdlib_core_file(path, repo_name),
+            lambda path: self._is_deno_runtime_entry_file(path, repo_name),
+            lambda path: self._is_deno_runtime_source_file(path, repo_name),
+            lambda path: self._is_deno_cli_core_file(path, repo_name),
+            lambda path: self._is_deno_core_file(path, repo_name),
+            self._is_python_runtime_entry_file,
+            self._is_python_core_module_file,
+            self._is_go_runtime_entry_file,
+            self._is_go_request_file,
+            self._is_go_source_file,
+            lambda path: self._is_rust_runtime_entry_file(path) and not self._is_deno_extension_file(path, repo_name) and (repo_name or "").lower() != "vscode",
+            lambda path: self._is_rust_source_file(path) and not self._is_deno_extension_file(path, repo_name) and (repo_name or "").lower() != "vscode",
             self._is_node_runtime_entry_file,
             self._is_client_runtime_entry_file,
             self._is_node_runtime_file,
@@ -562,9 +705,11 @@ class RemoteFileSelectorService:
         for file_info in self._selection_anchors(ranked_files, repo_name=repo_name):
             if len(selected) >= top_n:
                 break
+            if self._should_skip_final_selection(file_info["path"], repo_name=repo_name):
+                continue
             selected.append(file_info)
             anchored_paths.add(file_info["path"])
-            group_key = self._selection_group_key(file_info["path"])
+            group_key = self._selection_group_key(file_info["path"], repo_name=repo_name)
             if group_key is not None:
                 grouped_counts[group_key] = grouped_counts.get(group_key, 0) + 1
 
@@ -573,9 +718,11 @@ class RemoteFileSelectorService:
                 break
             if file_info["path"] in anchored_paths:
                 continue
+            if self._should_skip_final_selection(file_info["path"], repo_name=repo_name):
+                continue
 
-            group_key = self._selection_group_key(file_info["path"])
-            limit_for_group = self._selection_group_limit(file_info["path"])
+            group_key = self._selection_group_key(file_info["path"], repo_name=repo_name)
+            limit_for_group = self._selection_group_limit(file_info["path"], repo_name=repo_name)
             if group_key is not None and grouped_counts.get(group_key, 0) >= limit_for_group:
                 continue
 
@@ -585,11 +732,67 @@ class RemoteFileSelectorService:
 
         return selected
 
+    def _should_skip_final_selection(self, path: str, *, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() == "django":
+            if lowered.startswith("django/contrib/admindocs/"):
+                return True
+            if lowered in {
+                "django/__init__.py",
+                "django/http/cookie.py",
+                "django/core/checks/urls.py",
+            }:
+                return True
+        if (
+            repo_name
+            and Path(lowered).name == "__init__.py"
+            and self._is_python_repo_package_path(path, repo_name)
+            and not self._is_python_root_package_init(path, repo_name)
+        ):
+            return True
+        if (repo_name or "").lower() != "book":
+            return False
+        return (
+            lowered in {"dprint.jsonc", "ferris.css", "ferris.js"}
+            or lowered.startswith("dot/")
+            or lowered.startswith("packages/tools/")
+            or lowered.startswith("2018-edition/")
+        )
+
     def _selection_anchors(self, ranked_files: List[Dict[str, Any]], *, repo_name: str) -> List[Dict[str, Any]]:
         anchors: List[Dict[str, Any]] = []
         seen_paths: set[str] = set()
 
+        for anchor_path in self._django_anchor_paths(repo_name):
+            for file_info in ranked_files:
+                if file_info["path"] == anchor_path and file_info["path"] not in seen_paths:
+                    anchors.append(file_info)
+                    seen_paths.add(file_info["path"])
+                    break
+
         for predicate in (
+            lambda path: self._is_django_core_entry_file(path, repo_name),
+            lambda path: self._is_django_core_runtime_file(path, repo_name),
+            lambda path: self._is_django_core_model_file(path, repo_name),
+            lambda path: self._is_rust_book_manifest(path, repo_name),
+            lambda path: self._is_rust_book_book_config(path, repo_name),
+            lambda path: self._is_rust_book_primary_lib(path, repo_name),
+            lambda path: self._is_rust_book_secondary_lib(path, repo_name),
+            lambda path: self._is_rust_book_tertiary_lib(path, repo_name),
+            lambda path: self._is_content_pipeline_primary_config(path, repo_name),
+            lambda path: self._is_content_pipeline_config_file(path, repo_name),
+            lambda path: self._is_content_pipeline_primary_script(path, repo_name),
+            lambda path: self._is_content_pipeline_validation_script(path, repo_name),
+            lambda path: self._is_content_pipeline_linter_script(path, repo_name),
+            lambda path: self._is_content_pipeline_secondary_script(path, repo_name),
+            lambda path: self._is_content_pipeline_support_script(path, repo_name),
+            lambda path: self._is_vscode_primary_entry_file(path, repo_name),
+            lambda path: self._is_vscode_code_file(path, repo_name),
+            lambda path: self._is_vscode_workbench_file(path, repo_name),
+            lambda path: self._is_vscode_platform_file(path, repo_name),
+            lambda path: self._is_vscode_editor_file(path, repo_name),
+            lambda path: self._is_vscode_primary_module_file(path, repo_name),
+            lambda path: self._is_rust_book_core_file(path, repo_name),
             lambda path: self._is_core_package_manifest(path, repo_name),
             lambda path: self._is_core_package_server_entry_file(path, repo_name),
             lambda path: self._is_core_package_client_entry_file(path, repo_name),
@@ -597,6 +800,20 @@ class RemoteFileSelectorService:
             lambda path: self._is_core_package_client_file(path, repo_name),
             lambda path: self._is_core_package_runtime_entry_file(path, repo_name),
             lambda path: self._is_core_package_source_file(path, repo_name),
+            lambda path: self._is_python_repo_package_entry_file(path, repo_name),
+            lambda path: self._is_python_repo_package_module_file(path, repo_name),
+            lambda path: self._is_go_stdlib_core_file(path, repo_name),
+            lambda path: self._is_deno_runtime_entry_file(path, repo_name),
+            lambda path: self._is_deno_runtime_source_file(path, repo_name),
+            lambda path: self._is_deno_cli_core_file(path, repo_name),
+            lambda path: self._is_deno_core_file(path, repo_name),
+            self._is_python_runtime_entry_file,
+            self._is_python_core_module_file,
+            self._is_go_runtime_entry_file,
+            self._is_go_request_file,
+            self._is_go_source_file,
+            lambda path: self._is_rust_runtime_entry_file(path) and not self._is_deno_extension_file(path, repo_name) and (repo_name or "").lower() != "vscode",
+            lambda path: self._is_rust_source_file(path) and not self._is_deno_extension_file(path, repo_name) and (repo_name or "").lower() != "vscode",
             self._is_node_runtime_entry_file,
             self._is_client_runtime_entry_file,
             self._is_node_runtime_file,
@@ -614,18 +831,47 @@ class RemoteFileSelectorService:
 
         return anchors
 
-    def _selection_group_key(self, path: str) -> Optional[str]:
+    def _django_anchor_paths(self, repo_name: str) -> List[str]:
+        if (repo_name or "").lower() != "django":
+            return []
+        return [
+            "django/urls/base.py",
+            "django/core/handlers/base.py",
+            "django/core/handlers/wsgi.py",
+            "django/core/handlers/asgi.py",
+            "django/core/management/base.py",
+            "django/apps/config.py",
+            "django/db/models/base.py",
+            "django/http/request.py",
+            "django/http/response.py",
+        ]
+
+    def _selection_group_key(self, path: str, *, repo_name: Optional[str] = None) -> Optional[str]:
         lowered = path.lower()
         path_obj = Path(lowered)
         parent_name = path_obj.parent.name
         base_name = path_obj.name
 
+        if (repo_name or "").lower() == "django" and lowered.startswith("django/contrib/"):
+            parts = path_obj.parts
+            if len(parts) >= 3:
+                return f"django:contrib:{parts[2]}"
+        if base_name == "__init__.py" and lowered.endswith(".py"):
+            return "filename:python-init"
         if base_name == "tsconfig.json":
             return "filename:tsconfig.json"
         if len(path_obj.parts) == 1 and base_name in ESSENTIAL_CONFIG_FILES:
             return "root:essential-config"
         if len(path_obj.parts) == 3 and path_obj.parts[0] == "packages" and base_name == "package.json":
             return "filename:package-manifest"
+        if lowered.startswith("scripts/filecheck/"):
+            return "root:scripts:filecheck"
+        if lowered.startswith("scripts/"):
+            return "root:scripts"
+        if lowered.startswith("packages/tools/src/bin/"):
+            return "packages:tools-bin"
+        if parent_name in {"config", "cliconfig"}:
+            return f"parent:{path_obj.parent}"
         if "/src/api/" in lowered:
             return f"parent:{path_obj.parent}"
         if "/src/lib/" in lowered:
@@ -638,18 +884,30 @@ class RemoteFileSelectorService:
             return f"parent:{path_obj.parent}"
         return None
 
-    def _selection_group_limit(self, path: str) -> int:
+    def _selection_group_limit(self, path: str, *, repo_name: Optional[str] = None) -> int:
         lowered = path.lower()
         path_obj = Path(lowered)
         parent_name = path_obj.parent.name
         base_name = path_obj.name
 
+        if (repo_name or "").lower() == "django" and lowered.startswith("django/contrib/"):
+            return 1
+        if base_name == "__init__.py" and lowered.endswith(".py"):
+            return 1
         if base_name == "tsconfig.json":
             return 1
         if len(path_obj.parts) == 1 and base_name in ESSENTIAL_CONFIG_FILES:
             return 2
         if len(path_obj.parts) == 3 and path_obj.parts[0] == "packages" and base_name == "package.json":
             return 1
+        if lowered.startswith("scripts/filecheck/"):
+            return 3
+        if lowered.startswith("scripts/"):
+            return 1
+        if lowered.startswith("packages/tools/src/bin/"):
+            return 1
+        if parent_name in {"config", "cliconfig"}:
+            return 2
         if "/src/api/" in lowered:
             return 1
         if "/src/lib/" in lowered:
@@ -665,24 +923,48 @@ class RemoteFileSelectorService:
         return 999
 
     def _should_descend_into_dir(self, path: str) -> bool:
-        for part in Path(path).parts:
+        return not self._has_nonruntime_dir_part(Path(path).parts)
+
+    def _has_nonruntime_dir_part(self, parts: tuple[str, ...]) -> bool:
+        blocked_exact = {
+            "docs",
+            "doc",
+            "tests",
+            "test",
+            "bench",
+            "benches",
+            "benchmark",
+            "benchmarks",
+            "example",
+            "examples",
+            "fixture",
+            "fixtures",
+            "patches",
+            "dist",
+            "build",
+        } | NON_RUNTIME_DIRS
+        for part in parts:
             lowered = part.lower()
-            for blocked in NON_RUNTIME_DIRS | {"docs", "doc", "tests", "test", "__tests__", "patches", "dist", "build"}:
-                if lowered == blocked or lowered.startswith(f"{blocked}-"):
-                    return False
-        return True
+            if lowered in blocked_exact:
+                return True
+            if any(lowered.startswith(prefix) for prefix in TEST_LIKE_DIR_PREFIXES):
+                return True
+            if lowered.endswith(("_tests", "_test", "_fixtures", "_fixture", "_mocks")):
+                return True
+        return False
 
     def _directory_priority(self, path: str, repo_name: str) -> float:
         lowered = path.lower()
         name = Path(lowered).name
         score = 0.4
         repo_aliases = self._repo_aliases(repo_name)
+        repo_lower = repo_name.lower()
 
         if name == repo_name.lower():
             score += 1.2
         if name in repo_aliases:
             score += 1.4
-        if name in {"packages", "src", "lib", "app", "core", "server", "client", "node", "runtime", "cli"}:
+        if name in {"packages", "src", "lib", "app", "core", "server", "client", "node", "runtime", "cli", "cmd", "pkg", "internal", "staging"}:
             score += 1.0
         elif name == "api":
             score += 0.35
@@ -696,6 +978,15 @@ class RemoteFileSelectorService:
             score -= 0.8
         if name in {"shared", "common", "utils", "helpers"}:
             score += 0.3
+        if repo_lower == "django":
+            if name in {"django", "core", "urls", "db", "http", "middleware", "apps", "conf", "management"}:
+                score += 1.2
+            if name == "contrib":
+                score -= 0.35
+            if name in {"admindocs", "sitemaps", "flatpages"}:
+                score -= 0.95
+            if name in {"auth", "contenttypes", "admin"}:
+                score -= 0.15
 
         return score
 
@@ -709,8 +1000,15 @@ class RemoteFileSelectorService:
     def _dir_limit_for_path(self, current_path: str, depth: int, repo_name: str) -> int:
         limit = self._max_dirs_for_depth(depth)
         lowered = current_path.lower()
-        if lowered in {"src", "lib"}:
+        if (repo_name or "").lower() == "django":
+            if lowered == "django":
+                return max(limit, 9)
+            if lowered in {"django/core", "django/db", "django/http"}:
+                return max(limit, 7)
+        if lowered in {"src", "lib", "cmd", "pkg", "internal", "staging"}:
             return max(limit, 10)
+        if lowered.startswith("staging/src"):
+            return max(limit, 8)
         if any(lowered.startswith(f"packages/{alias}/src") for alias in self._repo_aliases(repo_name)):
             return max(limit, 8)
         return limit
@@ -718,6 +1016,125 @@ class RemoteFileSelectorService:
     def _is_root_workspace_config(self, path: str) -> bool:
         lowered = path.lower()
         return len(Path(lowered).parts) == 1 and Path(lowered).name in WORKSPACE_CONFIG_FILES
+
+    def _is_content_pipeline_primary_config(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        base_name = Path(lowered).name
+        return (repo_name or "").lower() == "content" and base_name == "package.json"
+
+    def _is_content_pipeline_config_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        base_name = Path(lowered).name
+        return (repo_name or "").lower() == "content" and base_name == "front-matter-config.json"
+
+    def _is_content_pipeline_primary_script(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        repo_lower = (repo_name or "").lower()
+        if repo_lower == "content":
+            return lowered in {
+                "scripts/filecheck/index.js",
+                "scripts/front-matter_linter.js",
+            }
+        return False
+
+    def _is_content_pipeline_validation_script(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        repo_lower = (repo_name or "").lower()
+        if repo_lower == "content":
+            return lowered == "scripts/filecheck/checker.js"
+        return False
+
+    def _is_content_pipeline_linter_script(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        repo_lower = (repo_name or "").lower()
+        if repo_lower == "content":
+            return lowered == "scripts/front-matter_linter.js"
+        return False
+
+    def _is_content_pipeline_secondary_script(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        repo_lower = (repo_name or "").lower()
+        if repo_lower == "content":
+            return lowered in {
+                "scripts/front-matter_utils.js",
+                "scripts/utils.js",
+            }
+        return False
+
+    def _is_content_pipeline_support_script(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        repo_lower = (repo_name or "").lower()
+        if repo_lower == "content":
+            return lowered in {
+                "scripts/filecheck/constants.js",
+                "scripts/filecheck/utils.js",
+                "scripts/update-interface-data.js",
+            }
+        return False
+
+    def _is_vscode_primary_entry_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "vscode":
+            return False
+        return lowered in {
+            "src/main.ts",
+            "src/cli.ts",
+            "src/server-main.ts",
+            "src/bootstrap-node.ts",
+            "src/bootstrap-server.ts",
+        }
+
+    def _is_vscode_primary_module_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "vscode":
+            return False
+        return lowered.endswith((".ts", ".js")) and (
+            lowered.startswith("src/vs/code/")
+            or lowered.startswith("src/vs/workbench/")
+            or lowered.startswith("src/vs/platform/")
+            or lowered.startswith("src/vs/editor/")
+        )
+
+    def _is_vscode_code_file(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "vscode" and path.lower().startswith("src/vs/code/")
+
+    def _is_vscode_workbench_file(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "vscode" and path.lower().startswith("src/vs/workbench/")
+
+    def _is_vscode_platform_file(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "vscode" and path.lower().startswith("src/vs/platform/")
+
+    def _is_vscode_editor_file(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "vscode" and path.lower().startswith("src/vs/editor/")
+
+    def _is_rust_book_manifest(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "book" and path.lower() == "cargo.toml"
+
+    def _is_rust_book_book_config(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "book" and path.lower() == "book.toml"
+
+    def _is_rust_book_primary_lib(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "book" and path.lower() == "packages/mdbook-trpl/src/lib.rs"
+
+    def _is_rust_book_secondary_lib(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "book" and path.lower() == "packages/mdbook-trpl/src/config/mod.rs"
+
+    def _is_rust_book_tertiary_lib(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "book" and path.lower() == "packages/trpl/src/lib.rs"
+
+    def _is_rust_book_core_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "book":
+            return False
+        return lowered in {
+            "cargo.toml",
+            "book.toml",
+            "packages/mdbook-trpl/src/lib.rs",
+            "packages/mdbook-trpl/src/config/mod.rs",
+            "packages/trpl/src/lib.rs",
+            "packages/mdbook-trpl/cargo.toml",
+            "packages/trpl/cargo.toml",
+        }
 
     def _is_core_package_manifest(self, path: str, repo_name: str) -> bool:
         lowered = path.lower()
@@ -778,6 +1195,146 @@ class RemoteFileSelectorService:
             return False
         return parts[1] in self._repo_aliases(repo_name) and "/src/api/" in lowered
 
+    def _is_python_runtime_entry_file(self, path: str) -> bool:
+        lowered = path.lower()
+        return lowered.endswith(".py") and Path(lowered).name in {
+            "app.py",
+            "main.py",
+            "server.py",
+            "cli.py",
+            "applications.py",
+        }
+
+    def _python_repo_aliases(self, repo_name: str) -> set[str]:
+        aliases: set[str] = set()
+        for alias in self._repo_aliases(repo_name):
+            if not alias:
+                continue
+            aliases.add(alias)
+            aliases.add(f"_{alias}")
+        return aliases
+
+    def _is_python_repo_package_path(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if not lowered.endswith(".py"):
+            return False
+        parts = Path(lowered).parts
+        if not parts:
+            return False
+        repo_aliases = self._python_repo_aliases(repo_name)
+        if len(parts) >= 2 and parts[0] == "src" and parts[1] in repo_aliases:
+            return True
+        return parts[0] in repo_aliases
+
+    def _is_python_repo_package_entry_file(self, path: str, repo_name: str) -> bool:
+        if not self._is_python_repo_package_path(path, repo_name):
+            return False
+        lowered = path.lower()
+        base_name = Path(lowered).name
+        if base_name == "__init__.py":
+            return self._is_python_root_package_init(path, repo_name)
+        return base_name in {
+            "main.py",
+            "app.py",
+            "cli.py",
+            "config.py",
+            "applications.py",
+        }
+
+    def _is_python_repo_package_module_file(self, path: str, repo_name: str) -> bool:
+        if not self._is_python_repo_package_path(path, repo_name):
+            return False
+        return Path(path.lower()).name in {
+            "config.py",
+            "apps.py",
+            "urls.py",
+            "views.py",
+            "models.py",
+            "middleware.py",
+            "registry.py",
+            "settings.py",
+            "fixtures.py",
+            "python.py",
+            "nodes.py",
+            "runner.py",
+            "hooks.py",
+            "mark.py",
+            "cacheprovider.py",
+            "capture.py",
+            "terminal.py",
+            "assertion.py",
+            "main.py",
+        }
+
+    def _is_python_root_package_init(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if Path(lowered).name != "__init__.py":
+            return False
+        parts = Path(lowered).parts
+        repo_aliases = self._python_repo_aliases(repo_name)
+        if len(parts) == 3 and parts[0] == "src" and parts[1] in repo_aliases:
+            return True
+        if len(parts) == 2 and parts[0] in repo_aliases:
+            return True
+        return False
+
+    def _is_django_core_entry_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "django":
+            return False
+        return lowered in {
+            "django/core/handlers/base.py",
+            "django/core/handlers/wsgi.py",
+            "django/core/handlers/asgi.py",
+            "django/urls/base.py",
+            "django/core/management/base.py",
+        }
+
+    def _is_django_core_runtime_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "django":
+            return False
+        return lowered in {
+            "django/apps/config.py",
+            "django/conf/global_settings.py",
+            "django/http/request.py",
+            "django/http/response.py",
+            "django/middleware/common.py",
+            "django/urls/base.py",
+            "django/core/handlers/base.py",
+            "django/core/handlers/wsgi.py",
+            "django/core/management/base.py",
+        }
+
+    def _is_django_core_model_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "django":
+            return False
+        return lowered in {
+            "django/db/models/base.py",
+            "django/db/models/query.py",
+            "django/db/models/fields/__init__.py",
+        }
+
+    def _is_python_core_module_file(self, path: str) -> bool:
+        lowered = path.lower()
+        if not lowered.endswith(".py"):
+            return False
+        return Path(lowered).name in {
+            "urls.py",
+            "routing.py",
+            "views.py",
+            "models.py",
+            "middleware.py",
+            "settings.py",
+            "blueprints.py",
+            "ctx.py",
+            "globals.py",
+            "encoders.py",
+            "responses.py",
+            "wsgi.py",
+        }
+
     def _is_node_runtime_file(self, path: str) -> bool:
         lowered = path.lower()
         return "/src/node/" in lowered and not lowered.endswith("tsconfig.json")
@@ -826,7 +1383,8 @@ class RemoteFileSelectorService:
             return False
         base_name = path_obj.name
         return (
-            base_name.startswith(("vitest.config", "eslint.config", "jest.config", "playwright.config"))
+            base_name in {"dprint.json", "dprint.jsonc"}
+            or base_name.startswith(("vitest.config", "eslint.config", "jest.config", "playwright.config"))
             or base_name.endswith((".config.ts", ".config.js", ".config.mjs", ".config.cjs"))
         )
 
@@ -861,13 +1419,127 @@ class RemoteFileSelectorService:
             "app-index.ts",
             "app-index.jsx",
             "app-index.js",
+            "main.go",
+            "server.go",
+            "cobra.go",
+            "root.go",
+            "main.rs",
+            "lib.rs",
+            "mod.rs",
         }
 
-    def _path_priority_multiplier(self, path: str) -> float:
+    def _is_go_runtime_entry_file(self, path: str) -> bool:
+        lowered = path.lower()
+        if not lowered.endswith(".go"):
+            return False
+        return Path(lowered).name in {"main.go", "server.go", "cobra.go", "root.go", "gin.go", "routergroup.go"}
+
+    def _is_go_request_file(self, path: str) -> bool:
+        lowered = path.lower()
+        if not lowered.endswith(".go"):
+            return False
+        if any(token in lowered for token in ("tracing", "telemetry", "metrics", "profil", "observ")):
+            return False
+        base_name = Path(lowered).name
+        if base_name in {"gin.go", "routergroup.go", "server.go", "router.go", "routes.go", "handler.go", "handlers.go"}:
+            return True
+        return any(
+            token in lowered
+            for token in (
+                "/apiserver/",
+                "/server/",
+                "/router/",
+                "/routes/",
+                "/handler/",
+                "/handlers/",
+                "/httprouter/",
+            )
+        )
+
+    def _is_go_source_file(self, path: str) -> bool:
+        lowered = path.lower()
+        return lowered.endswith(".go") and not lowered.endswith("_test.go")
+
+    def _is_go_stdlib_repo(self, repo_name: Optional[str]) -> bool:
+        return (repo_name or "").lower() == "go"
+
+    def _is_go_stdlib_core_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        return self._is_go_stdlib_repo(repo_name) and (
+            lowered.startswith("src/") and (lowered.endswith(".go") or Path(lowered).name == "go.mod")
+        )
+
+    def _is_rust_runtime_entry_file(self, path: str) -> bool:
+        lowered = path.lower()
+        if not lowered.endswith(".rs"):
+            return False
+        if self._is_nonruntime_noise_path(path):
+            return False
+        return Path(lowered).name in {"main.rs", "lib.rs", "mod.rs"}
+
+    def _is_rust_source_file(self, path: str) -> bool:
+        lowered = path.lower()
+        return (
+            lowered.endswith(".rs")
+            and not lowered.endswith("_test.rs")
+            and not self._is_nonruntime_noise_path(path)
+        )
+
+    def _is_deno_core_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        return (repo_name or "").lower() == "deno" and lowered.endswith(".rs") and (
+            lowered.startswith("cli/") or lowered.startswith("runtime/")
+        )
+
+    def _is_deno_extension_file(self, path: str, repo_name: str) -> bool:
+        return (repo_name or "").lower() == "deno" and path.lower().startswith("ext/")
+
+    def _is_deno_runtime_entry_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "deno" or not lowered.endswith(".rs"):
+            return False
+        return lowered in {
+            "cli/main.rs",
+            "cli/lib.rs",
+            "cli/factory.rs",
+            "cli/module_loader.rs",
+            "runtime/lib.rs",
+            "runtime/js.rs",
+            "runtime/worker.rs",
+            "runtime/web_worker.rs",
+        }
+
+    def _is_deno_runtime_source_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "deno" or not lowered.endswith(".rs"):
+            return False
+        return lowered.startswith("runtime/") or lowered.startswith("cli/rt/")
+
+    def _is_deno_cli_core_file(self, path: str, repo_name: str) -> bool:
+        lowered = path.lower()
+        if (repo_name or "").lower() != "deno" or not lowered.endswith(".rs"):
+            return False
+        return lowered in {
+            "cli/factory.rs",
+            "cli/file_fetcher.rs",
+            "cli/graph_container.rs",
+            "cli/graph_util.rs",
+            "cli/lib.rs",
+            "cli/main.rs",
+            "cli/module_loader.rs",
+            "cli/node.rs",
+            "cli/npm.rs",
+            "cli/resolver.rs",
+            "cli/task_runner.rs",
+        }
+
+    def _path_priority_multiplier(self, path: str, repo_name: Optional[str] = None) -> float:
         lowered = path.lower()
         parts = Path(lowered).parts
         base_name = Path(lowered).name
         multiplier = 1.0
+        repo_aliases = self._repo_aliases(repo_name or "") if repo_name else set()
+        repo_lower = (repo_name or "").lower()
 
         if base_name.endswith(".d.ts"):
             multiplier *= 0.4
@@ -878,14 +1550,191 @@ class RemoteFileSelectorService:
         if len(parts) == 1 and base_name in WORKSPACE_CONFIG_FILES:
             multiplier *= 0.92
 
+        if base_name == "makefile":
+            multiplier *= 0.68
+
         if parts[:1] == ("packages",) and len(parts) > 1 and self._is_tooling_package_dir_name(parts[1]):
             multiplier *= 0.62
 
         if base_name == "package.json" and parts[:1] == ("packages",):
             multiplier *= 1.2
+            if repo_aliases:
+                if parts[1] in repo_aliases:
+                    multiplier *= 1.18
+                else:
+                    multiplier *= 0.82
+
+        if parts[:1] == ("packages",) and len(parts) > 1 and repo_aliases:
+            if parts[1] in repo_aliases:
+                multiplier *= 1.2
+            else:
+                multiplier *= 0.72
+
+        if lowered.endswith((".go", ".rs")):
+            multiplier *= 1.08
+        if lowered.endswith(".py") and (
+            self._is_python_runtime_entry_file(path) or self._is_python_core_module_file(path)
+        ):
+            multiplier *= 1.18
+        if repo_name and self._is_python_repo_package_entry_file(path, repo_name):
+            multiplier *= 1.28
+        if repo_name and self._is_python_repo_package_module_file(path, repo_name):
+            multiplier *= 1.18
+        if base_name == "__init__.py" and lowered.endswith(".py"):
+            if repo_name and self._is_python_root_package_init(path, repo_name):
+                multiplier *= 0.92
+            else:
+                multiplier *= 0.36
+        if repo_lower == "django":
+            if lowered.startswith("django/contrib/admindocs/"):
+                multiplier *= 0.34
+            elif lowered.startswith("django/contrib/"):
+                multiplier *= 0.82
+            if lowered.startswith(
+                (
+                    "django/urls/",
+                    "django/core/handlers/",
+                    "django/db/models/",
+                    "django/http/",
+                    "django/middleware/",
+                    "django/apps/",
+                    "django/conf/",
+                    "django/core/management/",
+                )
+            ):
+                multiplier *= 1.34
+            if any(token in lowered for token in ("/urls.py", "/views.py", "/models.py", "/middleware/", "/handlers/", "/db/models/", "/http/")):
+                multiplier *= 1.26
+            if any(token in lowered for token in ("/conf/global_settings.py", "/apps/config.py", "/apps/registry.py")):
+                multiplier *= 1.08
+        if base_name in {"gin.go", "routergroup.go", "cobra.go", "main.go", "main.rs", "lib.rs", "mod.rs"}:
+            multiplier *= 1.24
 
         if lowered.startswith("src/") or "/src/" in lowered:
             multiplier *= 1.15
+
+        if lowered.startswith("cmd/") or "/cmd/" in lowered:
+            multiplier *= 1.12
+
+        if repo_lower == "go":
+            if lowered.startswith("src/"):
+                multiplier *= 1.42
+                if lowered.startswith("src/cmd/go/"):
+                    multiplier *= 1.18
+                if lowered.endswith(".go"):
+                    multiplier *= 1.18
+            elif lowered.startswith(("lib/", "misc/", "api/", "doc/", "test/")):
+                multiplier *= 0.22
+            else:
+                multiplier *= 0.46
+            if not lowered.endswith(".go") and base_name != "go.mod":
+                multiplier *= 0.16
+            if lowered.startswith(("lib/wasm/", "misc/chrome/", "lib/time/", "lib/hg/")):
+                multiplier *= 0.16
+
+        if repo_lower == "deno":
+            if lowered.startswith(("cli/", "runtime/")) and lowered.endswith(".rs"):
+                multiplier *= 1.54
+            if lowered in {
+                "cli/main.rs",
+                "cli/factory.rs",
+                "cli/lib.rs",
+                "cli/module_loader.rs",
+                "runtime/lib.rs",
+                "runtime/js.rs",
+                "runtime/worker.rs",
+                "runtime/web_worker.rs",
+            }:
+                multiplier *= 1.42
+            if lowered.startswith("runtime/") and lowered.endswith(".rs"):
+                multiplier *= 1.34
+            if lowered.startswith("cli/rt/") and lowered.endswith(".rs"):
+                multiplier *= 1.22
+            if lowered.startswith("cli/lib/") and lowered.endswith(".rs"):
+                multiplier *= 0.92
+            if lowered.startswith("cli/lib/npm/"):
+                multiplier *= 0.54
+            if lowered.startswith("cli/lib/standalone/"):
+                multiplier *= 0.72
+            if lowered.startswith("cli/lib/util/"):
+                multiplier *= 0.78
+            if lowered.startswith(("cli/tools/", "cli/lsp/", "cli/cache/")) and lowered.endswith(".rs"):
+                multiplier *= 0.74
+            if lowered.startswith("ext/") and lowered.endswith(".rs"):
+                multiplier *= 0.42
+            if lowered.startswith("ext/node/"):
+                multiplier *= 0.24
+
+        if repo_lower == "vscode":
+            if lowered in {
+                "src/main.ts",
+                "src/cli.ts",
+                "src/server-main.ts",
+                "src/bootstrap-node.ts",
+                "src/bootstrap-server.ts",
+                "package.json",
+                "product.json",
+            }:
+                multiplier *= 1.42
+            if lowered.startswith(("src/vs/code/", "src/vs/workbench/", "src/vs/platform/", "src/vs/editor/")):
+                multiplier *= 1.34
+            elif lowered.startswith("src/vs/base/"):
+                multiplier *= 1.08
+            if lowered.startswith("cli/src/") and lowered.endswith(".rs"):
+                multiplier *= 0.08
+            if lowered.startswith("remote/"):
+                multiplier *= 0.78
+
+        if repo_lower == "content":
+            if base_name in {"package.json", "front-matter-config.json"}:
+                multiplier *= 1.36
+            if lowered in {
+                "scripts/filecheck/index.js",
+                "scripts/filecheck/checker.js",
+                "scripts/filecheck/constants.js",
+                "scripts/filecheck/utils.js",
+                "scripts/front-matter_linter.js",
+                "scripts/front-matter_utils.js",
+                "scripts/utils.js",
+                "scripts/update-interface-data.js",
+            }:
+                multiplier *= 1.44
+            if lowered.startswith("files/"):
+                multiplier *= 0.12
+
+        if repo_lower == "book":
+            if lowered in {
+                "cargo.toml",
+                "book.toml",
+                "packages/mdbook-trpl/src/lib.rs",
+                "packages/mdbook-trpl/src/config/mod.rs",
+                "packages/trpl/src/lib.rs",
+                "packages/mdbook-trpl/cargo.toml",
+                "packages/trpl/cargo.toml",
+            }:
+                multiplier *= 1.46
+            if lowered == "dprint.jsonc":
+                multiplier *= 0.12
+            if lowered == "copyright":
+                multiplier *= 0.05
+            if lowered.endswith(".css"):
+                multiplier *= 0.08
+            if lowered.startswith("2018-edition/"):
+                multiplier *= 0.05
+            if lowered.startswith("packages/mdbook-trpl/src/bin/"):
+                multiplier *= 0.12
+            if lowered.startswith("packages/tools/"):
+                multiplier *= 0.05
+            if lowered.startswith("packages/tools/src/bin/"):
+                multiplier *= 0.22
+
+        if repo_lower == "remix":
+            if lowered.startswith("packages/remix/"):
+                multiplier *= 1.28
+            if lowered.startswith("scripts/"):
+                multiplier *= 0.48
+            if lowered.startswith("packages/") and not lowered.startswith("packages/remix/"):
+                multiplier *= 0.58
 
         if lowered.startswith("packages/") and "/src/" in lowered:
             multiplier *= 1.1
@@ -902,9 +1751,9 @@ class RemoteFileSelectorService:
         if self._is_node_runtime_entry_file(path) or self._is_client_runtime_entry_file(path):
             multiplier *= 1.34
 
-        if self._is_core_package_server_entry_file(path, repo_name=parts[1] if parts[:1] == ("packages",) and len(parts) > 1 else ""):
+        if repo_name and self._is_core_package_server_entry_file(path, repo_name=repo_name):
             multiplier *= 1.12
-        if self._is_core_package_client_entry_file(path, repo_name=parts[1] if parts[:1] == ("packages",) and len(parts) > 1 else ""):
+        if repo_name and self._is_core_package_client_entry_file(path, repo_name=repo_name):
             multiplier *= 1.12
 
         if self._is_runtime_entry_file(path) and any(
@@ -917,6 +1766,10 @@ class RemoteFileSelectorService:
 
         if "/scripts/" in lowered:
             multiplier *= 0.72
+        if lowered.startswith("scripts/"):
+            multiplier *= 0.68
+        if base_name in {"tox.ini", "pytest.ini", "noxfile.py"}:
+            multiplier *= 0.52
         if base_name == "tsconfig.json" and len(parts) > 1:
             multiplier *= 0.35
         if base_name == "tsconfig.json" and len(parts) == 1:
@@ -925,8 +1778,10 @@ class RemoteFileSelectorService:
             multiplier *= 0.72
         if self._is_root_tool_config(lowered):
             multiplier *= 0.78
+        if self._is_nonruntime_noise_path(path):
+            multiplier *= 0.35
         if "bench" in base_name:
-            multiplier *= 0.85
+            multiplier *= 0.5
 
         if base_name.startswith("vite.config.") and len(parts) > 1:
             multiplier *= 0.75
@@ -1014,6 +1869,9 @@ class RemoteFileSelectorService:
         python_count = ecosystem_profile.get("python", 0)
         rust_count = ecosystem_profile.get("rust", 0)
         go_count = ecosystem_profile.get("go", 0)
+        path_ecosystem = self._source_ecosystem(path)
+        dominant_ecosystem = max(ecosystem_profile, key=ecosystem_profile.get, default=None)
+        dominant_count = ecosystem_profile.get(dominant_ecosystem, 0) if dominant_ecosystem else 0
 
         if base_name in {"pyproject.toml", "requirements.txt", "requirements-dev.txt"}:
             if python_count == 0:
@@ -1053,6 +1911,15 @@ class RemoteFileSelectorService:
                 return 0.62
             if base_name in WORKSPACE_CONFIG_FILES:
                 return 0.9
+
+        if dominant_count >= 2 and path_ecosystem and dominant_ecosystem and path_ecosystem != dominant_ecosystem:
+            if dominant_ecosystem == "go":
+                return 0.58
+            if dominant_ecosystem in {"python", "rust"}:
+                return 0.6
+            if dominant_ecosystem == "js_ts":
+                return 0.68
+
         return 1.0
 
     def _importance_level(self, score: float) -> str:

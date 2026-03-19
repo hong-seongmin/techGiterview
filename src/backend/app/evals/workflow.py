@@ -317,6 +317,47 @@ def write_iteration_summary(iteration_id: str, payload: dict[str, Any]) -> Path:
 
 def build_review_packet_payload(db: Session, iteration_id: str) -> dict[str, Any]:
     records = build_iteration_run_index(db, iteration_id)
+    return _build_review_packet_payload_from_records(iteration_id, records)
+
+
+def build_review_packet_payload_for_analysis_ids(
+    db: Session,
+    analysis_ids: list[str],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    analyses = {
+        str(row.id): row
+        for row in db.query(RepositoryAnalysis).all()
+    }
+    file_runs_all = db.query(FileSelectionRun).order_by(FileSelectionRun.created_at.asc()).all()
+    question_runs_all = db.query(QuestionGenerationRun).order_by(QuestionGenerationRun.created_at.asc()).all()
+
+    records: list[dict[str, Any]] = []
+    for analysis_id in analysis_ids:
+        normalized_analysis_id = str(uuid.UUID(str(analysis_id)))
+        analysis = analyses.get(normalized_analysis_id)
+        if analysis is None:
+            continue
+        file_runs = [run for run in file_runs_all if str(run.analysis_id) == normalized_analysis_id]
+        question_runs = [run for run in question_runs_all if str(run.analysis_id) == normalized_analysis_id]
+        records.append(
+            {
+                "analysis_id": normalized_analysis_id,
+                "repo_url": analysis.repository_url,
+                "file_runs": file_runs,
+                "question_runs": question_runs,
+                "analysis": analysis,
+            }
+        )
+
+    return _build_review_packet_payload_from_records(label, records)
+
+
+def _build_review_packet_payload_from_records(
+    packet_id: str,
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
     selector_reviews = []
     question_reviews = []
 
@@ -376,7 +417,7 @@ def build_review_packet_payload(db: Session, iteration_id: str) -> dict[str, Any
             )
 
     return {
-        "iteration_id": iteration_id,
+        "iteration_id": packet_id,
         "selector_reviews": selector_reviews,
         "question_reviews": question_reviews,
     }

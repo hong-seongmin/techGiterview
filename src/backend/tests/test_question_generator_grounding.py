@@ -84,7 +84,7 @@ def test_extract_grounded_tech_candidates_supports_python_backend(monkeypatch):
 
     assert "Python" in candidate_names
     assert "Flask" in candidate_names
-    assert "Jinja2" in candidate_names
+    assert "Jinja2" not in candidate_names
 
 
 def test_extract_grounded_tech_candidates_supports_django_and_express(monkeypatch):
@@ -157,6 +157,91 @@ def test_extract_grounded_tech_candidates_supports_click(monkeypatch):
     assert "Click" in candidate_names
 
 
+def test_extract_grounded_tech_candidates_supports_pytest(monkeypatch):
+    generator = build_generator(monkeypatch)
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/pytest-dev/pytest",
+        analysis_data={
+            "metadata": {
+                "tech_stack": '{"Python": 1.0, "Pytest": 0.92}'
+            }
+        },
+        code_snippets=[],
+    )
+    selected_files = [
+        {
+            "content": 'import pytest\n\ndef main():\n    return 0\n',
+            "metadata": {
+                "file_path": "src/_pytest/main.py",
+                "language": "python",
+            },
+        },
+        {
+            "content": 'import pytest\n\ndef fixture():\n    return None\n',
+            "metadata": {
+                "file_path": "src/_pytest/fixtures.py",
+                "language": "python",
+            },
+        },
+        {
+            "content": '[project]\nname="pytest"\n',
+            "metadata": {
+                "file_path": "pyproject.toml",
+                "language": "toml",
+            },
+        },
+    ]
+
+    candidates = generator._extract_grounded_tech_candidates(state, selected_files)
+    candidate_names = [item["tech"] for item in candidates]
+
+    assert "Python" in candidate_names
+    assert "Pytest" in candidate_names
+
+
+def test_extract_grounded_tech_candidates_supports_go_and_go_frameworks(monkeypatch):
+    generator = build_generator(monkeypatch)
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/gin-gonic/gin",
+        analysis_data={
+            "metadata": {
+                "tech_stack": '{"Go": 1.0}'
+            }
+        },
+        code_snippets=[],
+    )
+    selected_files = [
+        {
+            "content": "module github.com/gin-gonic/gin\n",
+            "metadata": {
+                "file_path": "go.mod",
+                "language": "go",
+            },
+        },
+        {
+            "content": "package gin\n\ntype Engine struct{}\n",
+            "metadata": {
+                "file_path": "gin.go",
+                "language": "go",
+            },
+        },
+        {
+            "content": "package cobra\n\ntype Command struct{}\n",
+            "metadata": {
+                "file_path": "cobra.go",
+                "language": "go",
+            },
+        },
+    ]
+
+    candidates = generator._extract_grounded_tech_candidates(state, selected_files)
+    candidate_names = [item["tech"] for item in candidates]
+
+    assert "Go" in candidate_names
+    assert "Gin" in candidate_names
+    assert "Cobra" in candidate_names
+
+
 def test_extract_grounded_tech_candidates_supports_node_backend_and_cpp(monkeypatch):
     generator = build_generator(monkeypatch)
     state = question_generator_module.QuestionState(
@@ -190,6 +275,267 @@ def test_extract_grounded_tech_candidates_supports_node_backend_and_cpp(monkeypa
 
     assert "Node.js" in candidate_names
     assert "C++" in candidate_names
+
+
+def test_build_architecture_context_treats_scripts_as_module_files(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = generator._build_architecture_context(
+        [
+            {
+                "content": 'export function runChecks() { return true }\n',
+                "metadata": {
+                    "file_path": "scripts/filecheck/index.js",
+                    "language": "javascript",
+                    "has_real_content": True,
+                    "importance": "high",
+                    "complexity": 1.0,
+                },
+            },
+            {
+                "content": '{"name":"content","scripts":{"check":"node scripts/filecheck/index.js"}}',
+                "metadata": {
+                    "file_path": "package.json",
+                    "language": "json",
+                    "has_real_content": True,
+                    "importance": "low",
+                    "complexity": 1.0,
+                },
+            },
+        ]
+    )
+
+    assert "scripts/filecheck/index.js" in context["module_files"]
+    assert "build-pipeline" in context["evidence_terms"]
+
+
+def test_build_architecture_context_marks_content_pipeline_signals(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = generator._build_architecture_context(
+        [
+            {
+                "content": '{"required":["title"]}',
+                "metadata": {
+                    "file_path": "front-matter-config.json",
+                    "language": "json",
+                    "has_real_content": True,
+                    "importance": "high",
+                    "complexity": 1.0,
+                },
+            },
+            {
+                "content": 'export function checkDocument() { return true }\n',
+                "metadata": {
+                    "file_path": "scripts/filecheck/checker.js",
+                    "language": "javascript",
+                    "has_real_content": True,
+                    "importance": "high",
+                    "complexity": 1.0,
+                },
+            },
+        ]
+    )
+
+    assert "content-validation" in context["evidence_terms"]
+    assert "content-pipeline" in context["evidence_terms"]
+
+
+def test_build_architecture_focus_modes_supports_book_build_pipeline(monkeypatch):
+    generator = build_generator(monkeypatch)
+    focus_modes = generator._build_architecture_focus_modes(
+        {
+            "entry_files": [],
+            "config_files": ["Cargo.toml", "book.toml"],
+            "module_files": [
+                "packages/mdbook-trpl/src/lib.rs",
+                "packages/mdbook-trpl/src/config/mod.rs",
+                "packages/trpl/src/lib.rs",
+                "packages/tools/src/bin/cleanup_blockquotes.rs",
+            ],
+            "evidence_terms": ["rust-backend", "book-build-pipeline", "content-pipeline"],
+            "allowed_identifiers": [],
+        }
+    )
+
+    focus_names = [mode["name"] for mode in focus_modes]
+
+    assert "book-build-pipeline" in focus_names
+    assert "content-pipeline" in focus_names
+    assert any("book.toml" in mode["files"] for mode in focus_modes)
+
+
+def test_build_architecture_context_does_not_infer_go_request_routing_from_context_go_alone(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = generator._build_architecture_context(
+        [
+            {
+                "content": "package terraform\n\ntype Context struct{}\n",
+                "metadata": {
+                    "file_path": "internal/terraform/context.go",
+                    "language": "go",
+                    "has_real_content": True,
+                    "importance": "high",
+                    "complexity": 1.0,
+                },
+            },
+            {
+                "content": "module github.com/hashicorp/terraform\n",
+                "metadata": {
+                    "file_path": "go.mod",
+                    "language": "go",
+                    "has_real_content": True,
+                    "importance": "low",
+                    "complexity": 1.0,
+                },
+            },
+        ]
+    )
+
+    assert "request-routing" not in context["evidence_terms"]
+
+
+def test_build_architecture_context_does_not_infer_go_request_routing_from_tracing_mux(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = generator._build_architecture_context(
+        [
+            {
+                "content": "package tracing\n\nfunc Install() {}\n",
+                "metadata": {
+                    "file_path": "internal/tracing/mux.go",
+                    "language": "go",
+                    "has_real_content": True,
+                    "importance": "high",
+                    "complexity": 1.0,
+                },
+            },
+            {
+                "content": "module github.com/docker/compose/v2\n",
+                "metadata": {
+                    "file_path": "go.mod",
+                    "language": "go",
+                    "has_real_content": True,
+                    "importance": "low",
+                    "complexity": 1.0,
+                },
+            },
+        ]
+    )
+
+    assert "request-routing" not in context["evidence_terms"]
+
+
+def test_build_architecture_context_keeps_go_request_routing_for_apiserver(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = generator._build_architecture_context(
+        [
+            {
+                "content": "package apiserver\n\nfunc Run() {}\n",
+                "metadata": {
+                    "file_path": "pkg/controlplane/apiserver/server.go",
+                    "language": "go",
+                    "has_real_content": True,
+                    "importance": "high",
+                    "complexity": 1.0,
+                },
+            },
+            {
+                "content": "module k8s.io/kubernetes\n",
+                "metadata": {
+                    "file_path": "go.mod",
+                    "language": "go",
+                    "has_real_content": True,
+                    "importance": "low",
+                    "complexity": 1.0,
+                },
+            },
+        ]
+    )
+
+    assert "request-routing" in context["evidence_terms"]
+
+
+def test_validate_architecture_question_rejects_request_routing_without_evidence(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = {
+        "entry_files": ["main.go"],
+        "config_files": ["go.mod"],
+        "module_files": ["internal/command/login.go"],
+        "evidence_terms": ["cli-runtime", "go-backend", "go-module"],
+        "allowed_identifiers": [],
+    }
+
+    assert generator._validate_architecture_question(
+        "internal/command/login.go, go.mod 기준으로 요청 라우팅과 앱 객체 초기화 흐름이 어떻게 나뉘는지 설명해주세요.",
+        context,
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_generate_questions_by_type_does_not_reinflate_tech_stack_after_architecture_shortage(monkeypatch):
+    generator = build_generator(monkeypatch)
+    captured_counts = {}
+
+    async def fake_generate_questions_for_type(state, question_type, count):
+        captured_counts[question_type] = count
+        return [
+            {
+                "id": f"{question_type}_{index}",
+                "type": question_type,
+                "question": f"{question_type} question {index}",
+            }
+            for index in range(count)
+        ]
+
+    monkeypatch.setattr(generator, "_get_grounded_tech_capacity", lambda state: 1)
+    monkeypatch.setattr(generator, "_get_architecture_capacity", lambda state: 0)
+    monkeypatch.setattr(generator, "_generate_questions_for_type", fake_generate_questions_for_type)
+
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/example/content-repo",
+        question_types=["tech_stack", "architecture", "code_analysis"],
+    )
+
+    questions = await generator._generate_questions_by_type(state, 9)
+
+    assert captured_counts == {
+        "tech_stack": 1,
+        "code_analysis": 8,
+    }
+    assert len(questions) == 9
+
+
+@pytest.mark.asyncio
+async def test_generate_questions_by_type_skips_zero_allocated_types(monkeypatch):
+    generator = build_generator(monkeypatch)
+    captured_counts = {}
+
+    async def fake_generate_questions_for_type(state, question_type, count):
+        captured_counts[question_type] = count
+        return [
+            {
+                "id": f"{question_type}_{index}",
+                "type": question_type,
+                "question": f"{question_type} question {index}",
+            }
+            for index in range(count)
+        ]
+
+    monkeypatch.setattr(generator, "_get_grounded_tech_capacity", lambda state: 0)
+    monkeypatch.setattr(generator, "_get_architecture_capacity", lambda state: 3)
+    monkeypatch.setattr(generator, "_generate_questions_for_type", fake_generate_questions_for_type)
+
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/example/go-repo",
+        question_types=["tech_stack", "architecture", "code_analysis"],
+    )
+
+    questions = await generator._generate_questions_by_type(state, 9)
+
+    assert "tech_stack" not in captured_counts
+    assert captured_counts == {
+        "architecture": 3,
+        "code_analysis": 6,
+    }
+    assert len(questions) == 9
 
 
 def test_extract_code_elements_strips_jsdoc_comment_tokens(monkeypatch):
@@ -584,6 +930,22 @@ def test_validate_code_analysis_question_rejects_generic_identifier_hallucinatio
     )
 
 
+def test_validate_code_analysis_question_rejects_reserved_keyword_identifier(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "content": "def pytest_pycollect_makeitem():\n    return None\n",
+        "metadata": {
+            "file_path": "src/_pytest/python.py",
+            "extracted_elements": {"functions": ["pytest_pycollect_makeitem"]},
+        },
+    }
+
+    assert not generator._validate_code_analysis_question(
+        "`src/_pytest/python.py`에서 `from` 함수의 주요 기능과 구현 방식을 설명해주세요.",
+        snippet,
+    )
+
+
 def test_validate_architecture_question_rejects_ungrounded_patterns(monkeypatch):
     generator = build_generator(monkeypatch)
     architecture_context = {
@@ -665,6 +1027,45 @@ def test_extract_grounded_tech_candidates_skips_low_score_framework_noise(monkey
     assert "Rust" not in candidate_names
 
 
+def test_extract_grounded_tech_candidates_ignores_dependency_only_optional_frameworks(monkeypatch):
+    generator = build_generator(monkeypatch)
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/encode/starlette",
+        analysis_data={
+            "metadata": {
+                "tech_stack": '{"Python": 1.0, "Starlette": 0.9, "Jinja2": 0.45, "Flask": 0.45}'
+            }
+        },
+        code_snippets=[],
+    )
+    selected_files = [
+        {
+            "content": '[project]\ndependencies=["starlette>=0.46.0","jinja2>=3.1","flask>=3.0"]\n',
+            "metadata": {
+                "file_path": "pyproject.toml",
+                "language": "toml",
+                "has_real_content": True,
+            },
+        },
+        {
+            "content": "from starlette.responses import Response\nclass Router: pass\n",
+            "metadata": {
+                "file_path": "starlette/routing.py",
+                "language": "python",
+                "has_real_content": True,
+            },
+        },
+    ]
+
+    candidates = generator._extract_grounded_tech_candidates(state, selected_files)
+    candidate_names = [item["tech"] for item in candidates]
+
+    assert "Python" in candidate_names
+    assert "Starlette" in candidate_names
+    assert "Jinja2" not in candidate_names
+    assert "Flask" not in candidate_names
+
+
 def test_validate_architecture_question_rejects_internal_focus_labels(monkeypatch):
     generator = build_generator(monkeypatch)
     architecture_context = {
@@ -693,6 +1094,22 @@ def test_validate_architecture_question_rejects_unknown_backticked_identifiers(m
 
     assert not generator._validate_architecture_question(
         "FastAPI 애플리케이션 초기화에서 `create_app` 함수와 `Depends` 유틸리티가 어떻게 상호작용하는지 설명해주세요.",
+        architecture_context,
+    )
+
+
+def test_validate_architecture_question_rejects_korean_dependency_injection_without_evidence(monkeypatch):
+    generator = build_generator(monkeypatch)
+    architecture_context = {
+        "entry_files": ["pydantic/main.py"],
+        "config_files": ["pyproject.toml"],
+        "module_files": ["pydantic/fields.py"],
+        "evidence_terms": ["python-backend", "app-setup"],
+        "allowed_identifiers": [],
+    }
+
+    assert not generator._validate_architecture_question(
+        "pydantic/main.py와 pydantic/fields.py 기준으로 의존성 주입과 실행 컨텍스트 관리가 어떻게 연결되는지 설명해주세요.",
         architecture_context,
     )
 
@@ -798,6 +1215,59 @@ def test_select_architecture_seed_files_prefers_backend_runtime_files(monkeypatc
     assert "src/flask/views.py" in selected_paths
     assert "src/flask/cli.py" in selected_paths
     assert "src/flask/globals.py" in selected_paths
+
+
+def test_select_architecture_seed_files_prefers_django_request_runtime_files(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippets = [
+        {
+            "metadata": {
+                "file_path": "django/apps/config.py",
+                "importance": "high",
+                "complexity": 2.0,
+            },
+            "content": "class AppConfig: pass",
+        },
+        {
+            "metadata": {
+                "file_path": "django/urls/base.py",
+                "importance": "high",
+                "complexity": 3.0,
+            },
+            "content": "def path(route, view): pass",
+        },
+        {
+            "metadata": {
+                "file_path": "django/core/handlers/base.py",
+                "importance": "high",
+                "complexity": 3.0,
+            },
+            "content": "class BaseHandler: pass",
+        },
+        {
+            "metadata": {
+                "file_path": "django/middleware/common.py",
+                "importance": "medium",
+                "complexity": 2.0,
+            },
+            "content": "class CommonMiddleware: pass",
+        },
+        {
+            "metadata": {
+                "file_path": "pyproject.toml",
+                "importance": "low",
+                "complexity": 1.0,
+            },
+            "content": "[project]",
+        },
+    ]
+
+    selected = generator._select_architecture_seed_files(snippets)
+    selected_paths = [snippet["metadata"]["file_path"] for snippet in selected]
+
+    assert "django/urls/base.py" in selected_paths
+    assert "django/core/handlers/base.py" in selected_paths
+    assert "django/apps/config.py" in selected_paths
 
 
 @pytest.mark.asyncio
@@ -965,6 +1435,169 @@ def test_code_analysis_file_selection_avoids_repeating_package_json(monkeypatch)
     assert third["metadata"]["file_path"] == "packages/vite/src/node/index.ts"
 
 
+def test_code_analysis_file_selection_penalizes_scripts_and_noncore_packages(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippets = [
+        {
+            "content": '{"name":"remix"}',
+            "metadata": {
+                "file_path": "packages/remix/package.json",
+                "language": "json",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+        {
+            "content": "export const server = true\n",
+            "metadata": {
+                "file_path": "packages/remix/src/component/server.ts",
+                "language": "typescript",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 4.0,
+                "extracted_elements": {"functions": ["server"]},
+            },
+        },
+        {
+            "content": "export function getConnectedSignal() {}\n",
+            "metadata": {
+                "file_path": "packages/component/src/lib/component.ts",
+                "language": "typescript",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 4.0,
+                "extracted_elements": {"functions": ["getConnectedSignal"]},
+            },
+        },
+        {
+            "content": "export function sync() {}\n",
+            "metadata": {
+                "file_path": "scripts/utils/process.ts",
+                "language": "typescript",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"functions": ["sync"]},
+            },
+        },
+    ]
+
+    first = generator._get_code_analysis_files_for_question_index(
+        snippets,
+        0,
+        repo_url="https://github.com/remix-run/remix",
+    )[0]
+    second = generator._get_code_analysis_files_for_question_index(
+        snippets,
+        1,
+        repo_url="https://github.com/remix-run/remix",
+    )[0]
+    third = generator._get_code_analysis_files_for_question_index(
+        snippets,
+        2,
+        repo_url="https://github.com/remix-run/remix",
+    )[0]
+
+    assert first["metadata"]["file_path"] == "packages/remix/package.json"
+    assert second["metadata"]["file_path"] == "packages/remix/src/component/server.ts"
+    assert third["metadata"]["file_path"] != "scripts/utils/process.ts"
+    assert third["metadata"]["file_path"] != "packages/component/src/lib/component.ts"
+
+
+def test_code_analysis_file_selection_prefers_deno_runtime_entries_over_cli_lib_helpers(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippets = [
+        {
+            "content": "fn main() {}\n",
+            "metadata": {
+                "file_path": "cli/main.rs",
+                "language": "rust",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 2.0,
+                "extracted_elements": {"functions": ["main"]},
+            },
+        },
+        {
+            "content": "pub struct CliFactory;\n",
+            "metadata": {
+                "file_path": "cli/factory.rs",
+                "language": "rust",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"classes": ["CliFactory"]},
+            },
+        },
+        {
+            "content": "pub mod worker;\n",
+            "metadata": {
+                "file_path": "runtime/lib.rs",
+                "language": "rust",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"imports": ["worker"]},
+            },
+        },
+        {
+            "content": "pub struct Worker;\n",
+            "metadata": {
+                "file_path": "runtime/worker.rs",
+                "language": "rust",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"classes": ["Worker"]},
+            },
+        },
+        {
+            "content": "pub fn resolve_npm() {}\n",
+            "metadata": {
+                "file_path": "cli/lib/npm/mod.rs",
+                "language": "rust",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 4.0,
+                "extracted_elements": {"functions": ["resolve_npm"]},
+            },
+        },
+        {
+            "content": "pub struct CliLogger;\n",
+            "metadata": {
+                "file_path": "cli/lib/util/logger.rs",
+                "language": "rust",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 2.0,
+                "extracted_elements": {"classes": ["CliLogger"]},
+            },
+        },
+    ]
+
+    first = generator._get_code_analysis_files_for_question_index(
+        snippets,
+        0,
+        repo_url="https://github.com/denoland/deno",
+    )[0]
+    second = generator._get_code_analysis_files_for_question_index(
+        snippets,
+        1,
+        repo_url="https://github.com/denoland/deno",
+    )[0]
+    third = generator._get_code_analysis_files_for_question_index(
+        snippets,
+        2,
+        repo_url="https://github.com/denoland/deno",
+    )[0]
+
+    assert first["metadata"]["file_path"] in {"cli/main.rs", "runtime/lib.rs", "runtime/worker.rs"}
+    assert second["metadata"]["file_path"] in {"cli/main.rs", "runtime/lib.rs", "runtime/worker.rs", "cli/factory.rs"}
+    assert third["metadata"]["file_path"] != "cli/lib/npm/mod.rs"
+
+
 def test_validate_code_analysis_question_rejects_unsupported_runtime_claim(monkeypatch):
     generator = build_generator(monkeypatch)
     snippet = {
@@ -985,6 +1618,249 @@ def test_validate_code_analysis_question_rejects_unsupported_runtime_claim(monke
         "packages/vite/package.json에서 dev 스크립트가 HMR을 활성화하는 방식을 설명해주세요.",
         snippet,
     )
+
+
+def test_code_analysis_file_selection_prioritizes_distinct_primary_symbols(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippets = [
+        {
+            "content": "[project]\ndependencies=[\"flask>=3.0\"]\n",
+            "metadata": {
+                "file_path": "pyproject.toml",
+                "language": "toml",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+        {
+            "content": "def _make_timedelta(value):\n    return value\n",
+            "metadata": {
+                "file_path": "src/flask/sansio/app.py",
+                "language": "python",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 4.0,
+                "extracted_elements": {"functions": ["_make_timedelta"]},
+            },
+        },
+        {
+            "content": "def _make_timedelta(value):\n    return value\n",
+            "metadata": {
+                "file_path": "src/flask/app.py",
+                "language": "python",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 3.5,
+                "extracted_elements": {"functions": ["_make_timedelta"]},
+            },
+        },
+        {
+            "content": "def max_content_length(self):\n    return 0\n",
+            "metadata": {
+                "file_path": "src/flask/wrappers.py",
+                "language": "python",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"functions": ["max_content_length"]},
+            },
+        },
+    ]
+
+    first = generator._get_code_analysis_files_for_question_index(snippets, 0)[0]
+    second = generator._get_code_analysis_files_for_question_index(snippets, 1)[0]
+    third = generator._get_code_analysis_files_for_question_index(snippets, 2)[0]
+
+    assert first["metadata"]["file_path"] == "pyproject.toml"
+    assert second["metadata"]["file_path"] == "src/flask/sansio/app.py"
+    assert third["metadata"]["file_path"] == "src/flask/wrappers.py"
+
+
+def test_runtime_or_config_snippet_rejects_license_ci_and_rust_test_files(monkeypatch):
+    generator = build_generator(monkeypatch)
+
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "LICENSE-APACHE"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "ci/validate.sh"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "dprint.jsonc"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "COPYRIGHT"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "ferris.css"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "dot/trpl17-01.dot"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "packages/tools/Cargo.toml"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "tools/loggraphdiff/loggraphdiff.go"}})
+    assert not generator._is_runtime_or_config_snippet({"metadata": {"file_path": "2018-edition/book.toml"}})
+    assert not generator._is_runtime_or_config_snippet(
+        {"metadata": {"file_path": "packages/mdbook-trpl/src/config/tests.rs"}}
+    )
+    assert generator._is_runtime_or_config_snippet({"metadata": {"file_path": "packages/mdbook-trpl/src/lib.rs"}})
+
+
+def test_code_analysis_file_selection_prefers_rust_book_core_modules_over_bins_and_tooling(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippets = [
+        {
+            "content": '[workspace]\ndefault-members=["packages/mdbook-trpl"]\n',
+            "metadata": {
+                "file_path": "Cargo.toml",
+                "language": "toml",
+                "importance": "medium",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+        {
+            "content": '[book]\ntitle="The Rust Programming Language"\n',
+            "metadata": {
+                "file_path": "book.toml",
+                "language": "toml",
+                "importance": "low",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+        {
+            "content": "pub fn build() {}\n",
+            "metadata": {
+                "file_path": "packages/mdbook-trpl/src/lib.rs",
+                "language": "rust",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"functions": ["build"]},
+            },
+        },
+        {
+            "content": "pub struct Config;\n",
+            "metadata": {
+                "file_path": "packages/mdbook-trpl/src/config/mod.rs",
+                "language": "rust",
+                "importance": "very_high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"classes": ["Config"]},
+            },
+        },
+        {
+            "content": "pub fn render_listing() {}\n",
+            "metadata": {
+                "file_path": "packages/trpl/src/lib.rs",
+                "language": "rust",
+                "importance": "high",
+                "has_real_content": True,
+                "complexity": 3.0,
+                "extracted_elements": {"functions": ["render_listing"]},
+            },
+        },
+        {
+            "content": "pub fn rewrite_figure() {}\n",
+            "metadata": {
+                "file_path": "packages/mdbook-trpl/src/figure/mod.rs",
+                "language": "rust",
+                "importance": "medium",
+                "has_real_content": True,
+                "complexity": 2.0,
+                "extracted_elements": {"functions": ["rewrite_figure"]},
+            },
+        },
+        {
+            "content": "pub fn rewrite_heading() {}\n",
+            "metadata": {
+                "file_path": "packages/mdbook-trpl/src/heading/mod.rs",
+                "language": "rust",
+                "importance": "medium",
+                "has_real_content": True,
+                "complexity": 2.0,
+                "extracted_elements": {"functions": ["rewrite_heading"]},
+            },
+        },
+        {
+            "content": "fn main() {}\n",
+            "metadata": {
+                "file_path": "packages/mdbook-trpl/src/bin/listing.rs",
+                "language": "rust",
+                "importance": "low",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {"functions": ["main"]},
+            },
+        },
+        {
+            "content": "fn main() {}\n",
+            "metadata": {
+                "file_path": "packages/mdbook-trpl/src/bin/heading.rs",
+                "language": "rust",
+                "importance": "low",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {"functions": ["main"]},
+            },
+        },
+        {
+            "content": '{\"lineWidth\":100}\n',
+            "metadata": {
+                "file_path": "dprint.jsonc",
+                "language": "jsonc",
+                "importance": "low",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+        {
+            "content": '[workspace]\nmembers=["src/bin"]\n',
+            "metadata": {
+                "file_path": "packages/tools/Cargo.toml",
+                "language": "toml",
+                "importance": "low",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+        {
+            "content": '[book]\ntitle="Old Edition"\n',
+            "metadata": {
+                "file_path": "2018-edition/book.toml",
+                "language": "toml",
+                "importance": "low",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+        {
+            "content": "body { color: orange; }\n",
+            "metadata": {
+                "file_path": "ferris.css",
+                "language": "css",
+                "importance": "low",
+                "has_real_content": True,
+                "complexity": 1.0,
+                "extracted_elements": {},
+            },
+        },
+    ]
+
+    selected = [
+        generator._get_code_analysis_files_for_question_index(
+            snippets,
+            index,
+            repo_url="https://github.com/rust-lang/book",
+        )[0]["metadata"]["file_path"]
+        for index in range(5)
+    ]
+
+    assert selected[0] == "Cargo.toml"
+    assert "dprint.jsonc" not in selected
+    assert not any(path.startswith("packages/mdbook-trpl/src/bin/") for path in selected)
+    assert "packages/tools/Cargo.toml" not in selected
+    assert "2018-edition/book.toml" not in selected
+    assert "ferris.css" not in selected
+    assert "packages/mdbook-trpl/src/config/mod.rs" in selected
+    assert "packages/trpl/src/lib.rs" in selected
 
 
 def test_architecture_seed_files_include_client_and_node(monkeypatch):
@@ -1034,6 +1910,49 @@ def test_architecture_seed_files_include_client_and_node(monkeypatch):
     assert "packages/vite/src/node/index.ts" in selected_paths
     assert "packages/vite/src/client/client.ts" in selected_paths
     assert "packages/vite/package.json" in selected_paths
+
+
+def test_architecture_seed_files_prioritize_book_root_configs_and_core_modules(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippets = [
+        {
+            "content": '[workspace]\ndefault-members=["packages/mdbook-trpl"]\n',
+            "metadata": {"file_path": "Cargo.toml", "has_real_content": True, "importance": "low", "complexity": 1.0},
+        },
+        {
+            "content": '[book]\ntitle="The Rust Programming Language"\n',
+            "metadata": {"file_path": "book.toml", "has_real_content": True, "importance": "low", "complexity": 1.0},
+        },
+        {
+            "content": "pub fn build() {}\n",
+            "metadata": {"file_path": "packages/mdbook-trpl/src/lib.rs", "has_real_content": True, "importance": "low", "complexity": 2.0},
+        },
+        {
+            "content": "pub struct Config;\n",
+            "metadata": {"file_path": "packages/mdbook-trpl/src/config/mod.rs", "has_real_content": True, "importance": "very_high", "complexity": 3.0},
+        },
+        {
+            "content": "pub fn render_listing() {}\n",
+            "metadata": {"file_path": "packages/trpl/src/lib.rs", "has_real_content": True, "importance": "medium", "complexity": 2.0},
+        },
+        {
+            "content": "body { color: orange; }\n",
+            "metadata": {"file_path": "ferris.css", "has_real_content": True, "importance": "low", "complexity": 1.0},
+        },
+        {
+            "content": "strict = true\n",
+            "metadata": {"file_path": "dprint.jsonc", "has_real_content": True, "importance": "low", "complexity": 1.0},
+        },
+    ]
+
+    selected = generator._select_architecture_seed_files(snippets)
+    selected_paths = [snippet["metadata"]["file_path"] for snippet in selected]
+
+    assert selected_paths[:2] == ["Cargo.toml", "book.toml"]
+    assert "packages/mdbook-trpl/src/config/mod.rs" in selected_paths
+    assert "packages/trpl/src/lib.rs" in selected_paths
+    assert "ferris.css" not in selected_paths
+    assert "dprint.jsonc" not in selected_paths
 
 
 @pytest.mark.asyncio
@@ -1373,6 +2292,112 @@ def test_fallback_code_question_with_function_mentions_file_path(monkeypatch):
     assert "createServer" in question
 
 
+def test_fallback_tech_stack_question_avoids_generic_selection_reason(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "content": "class AppConfig:\n    def create(self):\n        return None\n",
+        "metadata": {
+            "file_path": "django/apps/config.py",
+            "extracted_elements": {
+                "classes": ["AppConfig"],
+                "functions": ["create"],
+                "imports": [],
+            },
+        },
+    }
+
+    question = generator._fallback_tech_stack_question(
+        "Django",
+        ["django/apps/config.py"],
+        [snippet],
+    )
+
+    assert "선택한 이유" not in question
+    assert "django/apps/config.py" in question
+    assert "create" in question or "AppConfig" in question
+
+
+def test_fallback_code_question_prefers_nontrivial_symbol_for_python(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "content": "class HelpAction:\n    def __init__(self):\n        pass\n\ndef pytest_addoption(parser):\n    return parser\n",
+        "metadata": {
+            "file_path": "src/_pytest/helpconfig.py",
+            "file_type": "general",
+            "extracted_elements": {
+                "classes": ["HelpAction"],
+                "functions": ["__init__", "pytest_addoption"],
+                "imports": [],
+            },
+        },
+    }
+
+    question = generator._generate_fallback_code_question(
+        snippet,
+        question_generator_module.QuestionState(repo_url="https://github.com/pytest-dev/pytest"),
+    )
+
+    assert "pytest_addoption" in question
+    assert "__init__" not in question
+
+
+def test_validate_code_analysis_question_rejects_trivial_hook_symbol(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "content": "def pytest_sessionstart(session):\n    session._fixturemanager = object()\n",
+        "metadata": {
+            "file_path": "src/_pytest/fixtures.py",
+            "file_type": "general",
+            "extracted_elements": {
+                "functions": ["pytest_sessionstart"],
+                "classes": [],
+                "imports": [],
+            },
+        },
+    }
+
+    assert not generator._validate_code_analysis_question(
+        "`src/_pytest/fixtures.py`에서 `pytest_sessionstart` 함수의 주요 기능과 구현 방식을 설명해주세요.",
+        snippet,
+    )
+
+
+def test_validate_tech_stack_question_rejects_generic_selection_reason(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "metadata": {
+            "file_path": "src/_pytest/main.py",
+            "extracted_elements": {"functions": ["pytest_addoption"], "classes": [], "imports": ["argparse"]},
+        },
+        "content": "def pytest_addoption(parser):\n    parser.addoption('--maxfail')\n",
+    }
+
+    assert not generator._validate_tech_stack_question(
+        "src/_pytest/main.py에서 드러나는 Python 사용 방식과, 이 기술을 현재 구조에 선택한 이유를 설명해주세요.",
+        tech="Python",
+        evidence_paths=["src/_pytest/main.py"],
+        evidence_files=[snippet],
+    )
+
+
+def test_select_code_analysis_focus_avoids_dunder_only_pick(monkeypatch):
+    generator = build_generator(monkeypatch)
+    snippet = {
+        "metadata": {
+            "file_path": "django/apps/config.py",
+            "extracted_elements": {
+                "classes": ["AppConfig"],
+                "functions": ["__repr__", "create", "get_models"],
+                "imports": [],
+            },
+        }
+    }
+
+    focus = generator._select_code_analysis_focus(snippet)
+
+    assert focus == {"kind": "function", "name": "create"}
+
+
 def test_architecture_duplicate_detection_considers_python_file_tokens(monkeypatch):
     generator = build_generator(monkeypatch)
     existing = [
@@ -1393,3 +2418,269 @@ def test_architecture_duplicate_detection_considers_python_file_tokens(monkeypat
 
     assert generator._is_duplicate_question(duplicate, existing)
     assert not generator._is_duplicate_question(distinct, existing)
+
+
+def test_build_architecture_context_supports_go_runtime_files(monkeypatch):
+    generator = build_generator(monkeypatch)
+    selected_files = [
+        {
+            "content": "module github.com/gin-gonic/gin\n",
+            "metadata": {
+                "file_path": "go.mod",
+                "language": "go",
+            },
+        },
+        {
+            "content": "type Context struct{}\nfunc (c *Context) Next() {}\n",
+            "metadata": {
+                "file_path": "context.go",
+                "language": "go",
+            },
+        },
+        {
+            "content": "type RouterGroup struct{}\nfunc (group *RouterGroup) GET() {}\n",
+            "metadata": {
+                "file_path": "routergroup.go",
+                "language": "go",
+            },
+        },
+        {
+            "content": "type Engine struct{}\nfunc New() *Engine { return &Engine{} }\n",
+            "metadata": {
+                "file_path": "gin.go",
+                "language": "go",
+            },
+        },
+    ]
+
+    context = generator._build_architecture_context(selected_files)
+    focus_names = [item["name"] for item in generator._build_architecture_focus_modes(context)]
+
+    assert "go-backend" in context["evidence_terms"]
+    assert "request-routing" in context["evidence_terms"]
+    assert "config-boundary" in focus_names
+    assert "module-boundary" in focus_names
+    assert "runtime-dependency" in focus_names
+
+
+def test_build_architecture_context_supports_rust_runtime_files(monkeypatch):
+    generator = build_generator(monkeypatch)
+    selected_files = [
+        {
+            "content": "[package]\nname = \"serde\"\n",
+            "metadata": {
+                "file_path": "Cargo.toml",
+                "language": "toml",
+            },
+        },
+        {
+            "content": "pub mod de;\npub mod ser;\n",
+            "metadata": {
+                "file_path": "serde_core/src/lib.rs",
+                "language": "rust",
+            },
+        },
+        {
+            "content": "pub trait Deserialize<'de>: Sized {}\n",
+            "metadata": {
+                "file_path": "serde_core/src/de/mod.rs",
+                "language": "rust",
+            },
+        },
+    ]
+
+    context = generator._build_architecture_context(selected_files)
+    focus_names = [item["name"] for item in generator._build_architecture_focus_modes(context)]
+
+    assert "rust-backend" in context["evidence_terms"]
+    assert "runtime-core" in focus_names
+    assert "config-boundary" in focus_names
+    assert "module-boundary" in focus_names
+    assert "runtime-dependency" in focus_names
+
+
+def test_build_architecture_focus_modes_support_monorepo_library_packages(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = {
+        "entry_files": [],
+        "config_files": ["pnpm-workspace.yaml", "packages/remix/package.json", "package.json"],
+        "module_files": [
+            "packages/remix/src/server.ts",
+            "packages/remix/src/fetch-router/routes.ts",
+            "packages/component/src/lib/run.ts",
+        ],
+        "evidence_terms": ["monorepo-workspace"],
+        "allowed_identifiers": [],
+    }
+
+    focus_modes = generator._build_architecture_focus_modes(context)
+    focus_names = {item["name"] for item in focus_modes}
+
+    assert "package-entry-core" in focus_names
+    assert "workspace-package-boundary" in focus_names
+    assert "build-config-boundary" in focus_names
+
+
+def test_extract_grounded_tech_candidates_ignores_incidental_flask_mentions(monkeypatch):
+    generator = build_generator(monkeypatch)
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/pallets/werkzeug",
+        analysis_data={
+            "metadata": {
+                "tech_stack": '{"Python": 1.0, "Flask": 1.0}'
+            }
+        },
+        code_snippets=[],
+    )
+    selected_files = [
+        {
+            "content": "from flask import current_app\n# Adapted from Flask's implementation\n",
+            "metadata": {
+                "file_path": "src/werkzeug/utils.py",
+                "language": "python",
+            },
+        },
+        {
+            "content": "def responder(f):\n    return f\n",
+            "metadata": {
+                "file_path": "src/werkzeug/wsgi.py",
+                "language": "python",
+            },
+        },
+    ]
+
+    candidates = generator._extract_grounded_tech_candidates(state, selected_files)
+    candidate_names = [item["tech"] for item in candidates]
+
+    assert "Python" in candidate_names
+    assert "Flask" not in candidate_names
+
+
+def test_build_architecture_context_recognizes_root_src_js_modules(monkeypatch):
+    generator = build_generator(monkeypatch)
+    selected_files = [
+        {
+            "content": '{"name":"redux"}',
+            "metadata": {
+                "file_path": "package.json",
+                "language": "json",
+            },
+        },
+        {
+            "content": "export { createStore } from './createStore'\n",
+            "metadata": {
+                "file_path": "src/index.ts",
+                "language": "typescript",
+            },
+        },
+        {
+            "content": "export function createStore() {}\n",
+            "metadata": {
+                "file_path": "src/createStore.ts",
+                "language": "typescript",
+            },
+        },
+    ]
+
+    context = generator._build_architecture_context(selected_files)
+    focus_names = [item["name"] for item in generator._build_architecture_focus_modes(context)]
+
+    assert "src/index.ts" in context["module_files"]
+    assert "src/createStore.ts" in context["module_files"]
+    assert "package-entry-core" in focus_names
+    assert "module-boundary" in focus_names
+
+
+def test_build_architecture_focus_modes_adds_python_generic_modes_when_specific_focuses_are_few(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = {
+        "entry_files": ["starlette/applications.py"],
+        "config_files": ["pyproject.toml"],
+        "module_files": ["starlette/applications.py", "starlette/routing.py", "starlette/config.py"],
+        "evidence_terms": ["python-backend", "request-routing", "app-setup"],
+        "allowed_identifiers": [],
+    }
+
+    focus_modes = generator._build_architecture_focus_modes(context)
+    focus_names = {item["name"] for item in focus_modes}
+
+    assert "request-flow" in focus_names
+    assert "app-setup" in focus_names
+    assert "config-boundary" in focus_names or "module-boundary" in focus_names
+
+
+def test_build_architecture_focus_modes_uses_request_flow_for_django_runtime_context(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = {
+        "entry_files": ["django/settings.py"],
+        "config_files": ["pyproject.toml"],
+        "module_files": [
+            "django/urls/base.py",
+            "django/core/handlers/base.py",
+            "django/apps/config.py",
+        ],
+        "evidence_terms": ["python-backend", "request-routing", "app-setup"],
+        "allowed_identifiers": [],
+    }
+
+    focus_modes = generator._build_architecture_focus_modes(context)
+    focus_names = {item["name"] for item in focus_modes}
+    request_flow = next(item for item in focus_modes if item["name"] == "request-flow")
+
+    assert "request-flow" in focus_names
+    assert "app-setup" in focus_names
+    assert "django/urls/base.py" in request_flow["files"]
+    assert "django/core/handlers/base.py" in request_flow["files"]
+    assert "django/core/checks/urls.py" not in request_flow["files"]
+
+
+def test_build_architecture_focus_modes_avoids_app_setup_for_library_style_main_py(monkeypatch):
+    generator = build_generator(monkeypatch)
+    context = {
+        "entry_files": ["pydantic/main.py", "pydantic-core/src/lib.rs"],
+        "config_files": [],
+        "module_files": [
+            "pydantic/main.py",
+            "pydantic-core/src/lib.rs",
+            "pydantic-core/src/errors/types.rs",
+        ],
+        "evidence_terms": ["python-backend", "rust-backend", "app-setup"],
+        "allowed_identifiers": [],
+    }
+
+    focus_modes = generator._build_architecture_focus_modes(context)
+    focus_names = [item["name"] for item in focus_modes]
+
+    assert "app-setup" not in focus_names
+    assert "config-boundary" not in focus_names
+    assert "framework-core" in focus_names
+    assert "module-boundary" in focus_names
+    assert "runtime-core" in focus_names
+
+
+def test_architecture_capacity_matches_available_focus_modes(monkeypatch):
+    generator = build_generator(monkeypatch)
+    state = question_generator_module.QuestionState(
+        repo_url="https://github.com/pallets/werkzeug",
+        analysis_data={"metadata": {"tech_stack": '{"Python": 1.0}'}},
+        code_snippets=[
+            {
+                "content": "def responder(f):\n    return f\n",
+                "metadata": {"file_path": "src/werkzeug/wsgi.py", "language": "python", "importance": "high", "has_real_content": True, "complexity": 3.0},
+            },
+            {
+                "content": "def quote(value):\n    return value\n",
+                "metadata": {"file_path": "src/werkzeug/urls.py", "language": "python", "importance": "high", "has_real_content": True, "complexity": 3.0},
+            },
+            {
+                "content": "class Internal:\n    pass\n",
+                "metadata": {"file_path": "src/werkzeug/_internal.py", "language": "python", "importance": "high", "has_real_content": True, "complexity": 3.0},
+            },
+            {
+                "content": "[project]\nname='werkzeug'\n",
+                "metadata": {"file_path": "pyproject.toml", "language": "toml", "importance": "low", "has_real_content": True, "complexity": 1.0},
+            },
+        ],
+    )
+
+    assert generator._get_architecture_capacity(state) >= 3

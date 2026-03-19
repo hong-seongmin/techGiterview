@@ -85,6 +85,7 @@ async def test_analyze_simple_persists_analysis_and_file_selection_runs(monkeypa
     monkeypatch.setattr(github_api, "RepositoryAnalyzer", FakeRepositoryAnalyzer)
     monkeypatch.setattr(github_api.settings, "file_selector_display_variant", "selector_v1")
     monkeypatch.setattr(github_api.settings, "file_selector_shadow_enabled", True)
+    monkeypatch.setattr(github_api.settings, "file_selector_canary_percent", 100)
 
     try:
         result = await github_api.analyze_repository_simple(request, response, db)
@@ -101,9 +102,19 @@ async def test_analyze_simple_persists_analysis_and_file_selection_runs(monkeypa
 
         assert response.headers.get("X-Analysis-Token")
         assert analysis_row is not None
-        assert analysis_row.analysis_metadata["selector_experiment"]["display_variant"] == "selector_v1"
-        assert analysis_row.analysis_metadata["selector_experiment"]["shadow_variant"] == "selector_v2"
+        selector_experiment = analysis_row.analysis_metadata["selector_experiment"]
+        assert selector_experiment["display_variant"] == github_api.CANONICAL_SELECTOR_VARIANT
+        assert selector_experiment["shadow_variant"] == github_api.LEGACY_SELECTOR_VARIANT
+        assert selector_experiment["mode"] == github_api.SELECTOR_PRODUCTION_MODE
+        assert selector_experiment["applied_profile"] == github_api.BEST_CASE_SELECTOR_PROFILE
+        assert selector_experiment["best_case_guaranteed"] is True
+        assert selector_experiment["analysis_profile_status"] == github_api.ANALYSIS_STATUS_FRESH_BEST_CASE
         assert 0 <= analysis_row.analysis_metadata["selector_experiment"]["assignment_bucket"] < 100
+        assert analysis_row.analysis_metadata["best_case_profile"]["applied"] is True
+        assert (
+            analysis_row.analysis_metadata["best_case_profile"]["selector_variant"]
+            == github_api.CANONICAL_SELECTOR_VARIANT
+        )
         persisted_files = analysis_row.analysis_metadata["selected_key_files"]
         assert any(file_info.get("content") for file_info in persisted_files)
         assert len(runs) == 2
