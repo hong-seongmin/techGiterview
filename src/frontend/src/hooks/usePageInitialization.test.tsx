@@ -22,7 +22,7 @@ describe('usePageInitialization', () => {
           {
             id: 'upstage-solar-pro3',
             name: 'Upstage Solar Pro3 (추천)',
-            model: 'solar-pro3',
+            model: 'solar-pro3-260126',
             status: 'ready',
             recommended: true,
           },

@@ -63,7 +63,7 @@ const getLocalData = (): PageInitData => {
     providers.push({
       id: 'upstage-solar-pro3',
       name: 'Upstage Solar Pro3 (기본)',
-      model: 'solar-pro3',
+      model: 'solar-pro3-260126',
       status: 'ready',
       recommended: true
     })
@@ -83,7 +83,7 @@ const getLocalData = (): PageInitData => {
     providers.push({
       id: 'upstage-solar-pro3',
       name: 'Upstage Solar Pro3 (기본)',
-      model: 'solar-pro3',
+      model: 'solar-pro3-260126',
       status: 'configured',
       recommended: true
     })

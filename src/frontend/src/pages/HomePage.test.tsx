@@ -50,7 +50,7 @@ const createInitializationState = () => ({
     {
       id: 'upstage-solar-pro3',
       name: 'Upstage Solar Pro3',
-      model: 'solar-pro3',
+      model: 'solar-pro3-260126',
       status: 'ready',
       recommended: true,
     },

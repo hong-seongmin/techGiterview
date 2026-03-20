@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[str] = None
     google_api_key: Optional[str] = None  # Required for Gemini
     upstage_api_key: Optional[str] = None  # Preferred for Solar Pro3
+    upstage_solar_alias_model: str = "solar-pro3"
+    upstage_solar_model: str = "solar-pro3-260126"
+    upstage_solar_candidate_model: str = "solar-pro3-260323"
     
     # LangSmith
     langsmith_api_key: Optional[str] = None

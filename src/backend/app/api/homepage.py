@@ -98,7 +98,7 @@ async def get_homepage_init_data(
             "providers": [{
                 "id": "upstage-solar-pro3",
                 "name": "Upstage Solar Pro3 (기본)",
-                "model": "solar-pro3",
+                "model": settings.upstage_solar_model,
                 "status": "available",
                 "recommended": True
             }],

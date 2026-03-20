@@ -19,6 +19,8 @@ from app.core.config import settings
     
 logger = logging.getLogger(__name__)
 
+UPSTAGE_SOLAR_ALIAS_MODEL = "solar-pro3"
+
 
 class AIProvider(str, Enum):
     UPSTAGE_SOLAR = "upstage-solar-pro3"
@@ -67,7 +69,7 @@ class AIService:
                 if upstage_api_key:
                     self.available_providers[AIProvider.UPSTAGE_SOLAR] = {
                         "client": None,
-                        "model": "solar-pro3",
+                        "model": settings.upstage_solar_model,
                         "status": "ready"
                     }
                     logger.info("Upstage Solar Pro3 initialized successfully")
@@ -139,7 +141,7 @@ class AIService:
                 logger.warning("No AI providers available, adding fallback provider")
                 self.available_providers[AIProvider.UPSTAGE_SOLAR] = {
                     "client": None,
-                    "model": "solar-pro3",
+                    "model": settings.upstage_solar_model,
                     "status": "fallback"
                 }
                 
@@ -149,7 +151,7 @@ class AIService:
             self.available_providers = {
                 AIProvider.UPSTAGE_SOLAR: {
                     "client": None,
-                    "model": "solar-pro3",
+                    "model": settings.upstage_solar_model,
                     "status": "error_fallback"
                 }
             }
@@ -335,7 +337,7 @@ class AIService:
 
         endpoint = os.getenv("UPSTAGE_API_URL", "https://api.upstage.ai/v1/chat/completions")
         payload = {
-            "model": "solar-pro3",
+            "model": settings.upstage_solar_model,
             "messages": [
                 {"role": "user", "content": prompt},
             ],

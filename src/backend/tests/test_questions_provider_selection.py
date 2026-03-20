@@ -1,8 +1,11 @@
 import pytest
 
+from app.api import ai_settings
 from app.api import questions as questions_api
 from app.agents import question_generator
-from app.core.ai_service import AIProvider
+from app.core import ai_service as ai_service_module
+from app.core.ai_service import AIProvider, AIService
+from app.core.config import settings
 from fastapi import HTTPException
 
 
@@ -82,3 +85,58 @@ async def test_question_generator_uses_preferred_provider_for_ai_calls(monkeypat
     )
 
     assert called == [AIProvider.UPSTAGE_SOLAR, AIProvider.UPSTAGE_SOLAR]
+
+
+def test_ai_settings_exposes_pinned_upstage_model():
+    providers = ai_settings.get_effective_providers({"upstage_api_key": "upstage-key"})
+
+    solar = next(provider for provider in providers if provider["id"] == AIProvider.UPSTAGE_SOLAR.value)
+
+    assert solar["model"] == settings.upstage_solar_model
+    assert solar["model"] == "solar-pro3-260126"
+
+
+@pytest.mark.asyncio
+async def test_upstage_generation_uses_pinned_model(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, endpoint, json, headers, timeout):
+            captured["endpoint"] = endpoint
+            captured["payload"] = json
+            captured["headers"] = headers
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+    monkeypatch.setattr(ai_service_module.aiohttp, "ClientSession", lambda: FakeSession())
+
+    service = AIService()
+    result = await service._generate_with_upstage(
+        "hello",
+        api_keys={"upstage_api_key": "test-key"},
+    )
+
+    assert captured["payload"]["model"] == settings.upstage_solar_model
+    assert captured["payload"]["model"] == "solar-pro3-260126"
+    assert result["model"] == settings.upstage_solar_model

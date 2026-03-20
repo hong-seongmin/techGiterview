@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 
 from app.core.ai_service import ai_service, AIProvider
-from app.core.config import check_env_file_exists
+from app.core.config import check_env_file_exists, settings
 
 router = APIRouter(prefix="/api/v1/ai", tags=["ai-settings"])
 
@@ -46,7 +46,7 @@ def get_effective_providers(api_keys: Dict[str, str]) -> List[Dict[str, Any]]:
             providers.append({
                 "id": AIProvider.UPSTAGE_SOLAR.value,
                 "name": "Upstage Solar Pro3 (추천)",
-                "model": "solar-pro3",
+                "model": settings.upstage_solar_model,
                 "status": "ready",
                 "recommended": True
             })
