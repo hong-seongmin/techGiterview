@@ -20,12 +20,12 @@
 <img src="./demo/demo3.png" width="700" alt="분석 대시보드 2">
 </div>
 
-*SmartFileImportanceAnalyzer 기반 4차원 파일 분석, 기술 스택 분포, 복잡도 점수 시각화*
+*SmartFileImportanceAnalyzer 기반 저장소 분석, 기술 스택 요약, 질문/코드 그래프 및 레거시 상세 대시보드 화면*
 
 ### 💬 AI 질문 생성 & 모의면접
 <img src="./demo/demo4.png" width="700" alt="질문 생성 및 모의면접">
 
-*저장소 분석 결과를 바탕으로 생성된 맞춤형 기술면접 질문과 실시간 모의면접*
+*저장소 분석 결과를 바탕으로 생성된 맞춤형 기술면접 질문과 답변 제출 후 즉시 피드백을 제공하는 모의면접*
 
 ---
 
@@ -33,14 +33,14 @@
 
 **[🚀 https://tgv.oursophy.com/](https://tgv.oursophy.com/)**
 
-실제 서비스를 바로 체험해보세요! 별도 설치 없이 GitHub 저장소만 있으면 즉시 이용 가능합니다.
+실제 서비스를 바로 체험해보세요! GitHub 저장소 URL과 AI API 키 1개(Upstage 또는 Google)만 있으면 바로 이용할 수 있습니다.
 
 ## ✨ 주요 기능
 
 ### 🔑 유연한 API 키 관리
 - **개발환경**: `.env.dev` 파일 기반 설정
-- **배포환경**: 웹 UI를 통한 localStorage 기반 보안 설정  
-- **개인정보 보호**: API 키는 브라우저에서만 저장, 서버 미전송
+- **웹 UI 지원**: localStorage에 API 키를 저장하고 화면에서 바로 관리
+- **요청 전달 방식**: 저장된 키는 분석/질문 생성 시 필요한 요청 헤더로 전달되며, localStorage 모드에서는 서버에 영구 저장하지 않음
 
 ### 🧠 스마트 분석 시스템
 - **SmartFileImportanceAnalyzer**: 4차원 파일 중요도 분석 (복잡도, 의존성, 크기, 패턴)
@@ -48,19 +48,20 @@
 - **복잡도 점수**: 0-10점 스케일 기반 코드 복잡도 평가
 
 ### 🤖 AI 기반 질문 생성
-- **Google Gemini 2.0 Flash**: 최신 AI 모델로 고품질 질문 생성
+- **멀티 프로바이더 지원**: Upstage Solar Pro3 우선, Google Gemini 2.0 Flash 지원
 - **맞춤형 질문**: 저장소 분석 결과 기반 특화 질문
-- **3가지 유형**: 기술스택, 아키텍처, 코드분석 질문 균형 배분
+- **기본 3가지 유형**: 기술스택, 아키텍처, 코드분석 질문 균형 배분
+- **확장 질문 유형**: design patterns, problem solving, best practices까지 지원
 
 ### 💬 실시간 모의면접
-- **WebSocket 기반**: 실시간 대화형 면접 시뮬레이션
+- **기본 UI 진행 방식**: REST 기반 답변 제출 및 피드백 처리, 백엔드 WebSocket 엔드포인트 지원
 - **즉시 피드백**: AI 기반 답변 분석 및 개선 제안
 - **진행률 추적**: 질문별 답변 완료도 시각화
 
 ### 🎨 모던 UI/UX
 - **React 18 + TypeScript**: 최신 웹 기술 스택
 - **반응형 디자인**: 데스크톱/모바일 최적화
-- **접근성 지원**: WCAG 기준 준수, 다크모드 지원
+- **접근성 지원**: 키보드/ARIA 패턴 적용, 다크모드 지원
 
 ## 🚀 빠른 시작
 
@@ -80,7 +81,7 @@ docker-compose up -d
 # API 문서: http://localhost:9104/docs
 ```
 
-> 💡 **API 키 설정**: 웹 사이트 접속 후 '**API 키 설정**' 버튼을 클릭하여 GitHub 토큰과 Google API 키를 입력하세요. 키는 브라우저에만 저장되어 안전합니다.
+> 💡 **API 키 설정**: 웹 사이트 접속 후 '**API 키 설정**' 버튼을 클릭하여 AI API 키를 입력하세요. Upstage 또는 Google API 키 중 하나가 필수이며, GitHub 토큰은 선택 사항입니다. 저장한 키는 브라우저 localStorage에 보관할 수 있고, 필요한 API 요청 시 헤더로 전달됩니다.
 
 ### 방법 2: 개발 환경 설정
 
@@ -89,12 +90,14 @@ docker-compose up -d
 git clone https://github.com/hong-seongmin/techGiterview.git
 cd techGiterview
 
-# 2. 환경 변수 설정 (개발용)
-cp src/backend/.env.example src/backend/.env.dev
-
-# .env.dev 파일에 API 키 설정
-GITHUB_TOKEN=ghp_your_github_token
+# 2. 환경 변수 파일 생성 (개발용)
+cat > src/backend/.env.dev <<'EOF'
+GITHUB_TOKEN=ghp_your_optional_github_token
+UPSTAGE_API_KEY=up_your_upstage_api_key
 GOOGLE_API_KEY=AIza_your_google_api_key
+EOF
+
+# Upstage 또는 Google API 키 중 하나는 필수, GitHub 토큰은 선택
 
 # 3. Docker Compose 실행
 docker-compose up -d
@@ -102,13 +105,15 @@ docker-compose up -d
 
 ### API 키 발급 가이드
 
+> 현재 서비스는 **Upstage Solar Pro3** 와 **Google Gemini 2.0 Flash** 를 모두 지원합니다. 두 키 중 하나만 있어도 분석과 질문 생성이 가능합니다.
+
 #### GitHub Personal Access Token
 1. [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens) 접속
 2. **Generate new token (classic)** 클릭
 3. **repo** 권한 체크 (저장소 읽기용)
 4. 생성된 `ghp_` 토큰 복사
 
-#### Google API Key (Gemini)  
+#### Google API Key (Gemini)
 1. [Google AI Studio](https://aistudio.google.com/app/apikey) 접속
 2. **Create API Key** 클릭
 3. 생성된 `AIza` 키 복사
@@ -117,27 +122,28 @@ docker-compose up -d
 
 ### Backend
 - **FastAPI** - 고성능 Python 웹 프레임워크
-- **Google Gemini 2.0 Flash** - 최신 AI 모델 (질문 생성 & 피드백)
+- **Upstage Solar Pro3 + Google Gemini 2.0 Flash** - 멀티 프로바이더 AI 구성
 - **LangGraph** - AI 에이전트 워크플로우 관리
 - **SmartFileImportanceAnalyzer** - 4차원 파일 중요도 분석 알고리즘
-- **PostgreSQL** - 메인 데이터베이스 (분석 결과 저장)
-- **Redis** - 캐싱 및 세션 관리
-- **ChromaDB** - 벡터 임베딩 저장소
+- **SQLite (기본) / PostgreSQL (호환)** - 분석 결과 및 면접 데이터 저장
+- **Redis** - 일부 캐싱 및 세션/토큰 연동
+- **ChromaDB** - 선택적 벡터 임베딩 저장소
 - **aiohttp** - 비동기 HTTP 클라이언트 (GitHub API)
 
 ### Frontend  
 - **React 18** + **TypeScript** - 모던 웹 프레임워크
 - **Vite** - 차세대 빌드 도구 (HMR 지원)
 - **CSS Variables** - 동적 테마 시스템 (다크모드 지원)
-- **LocalStorage API** - 보안 API 키 관리
-- **WebSocket** - 실시간 모의면접 통신
+- **LocalStorage API** - 로컬 API 키 저장 및 세션 토큰 관리
+- **REST + WebSocket** - 현재 면접 UI는 REST 중심, 백엔드 WebSocket 엔드포인트 지원
 - **Responsive Design** - 모바일 최적화
 
 ### DevOps & Infrastructure
 - **Docker** + **Docker Compose** - 컨테이너 기반 배포
-- **PostgreSQL 15** - 관계형 데이터베이스
+- **SQLite + Redis** - 기본 로컬/개발 실행 스택
+- **PostgreSQL** - 선택적 호환 데이터베이스
 - **Redis 7** - 인메모리 캐시
-- **Nginx** - 리버스 프록시 (프로덕션)
+- **Nginx** - 프로덕션 프론트엔드 정적 파일 서빙
 
 ## 📊 SmartFileImportanceAnalyzer - 4차원 파일 중요도 분석
 
@@ -206,10 +212,10 @@ complexity_score = (
 ```
 
 **구조적 중요도 패턴 매칭**:
-- **메인 파일**: `main.py`, `app.js`, `index.tsx` → 가중치 0.9
-- **설정 파일**: `package.json`, `webpack.config.js` → 가중치 0.8  
-- **핵심 컴포넌트**: `components/`, `core/`, `src/` → 경로 보너스 1.2배
-- **테스트/문서**: `test/`, `docs/` → 가중치 0.3
+- **메인 파일 보너스**: `main.py`, `app.js`, `index.tsx`, `package.json` → 파일명 multiplier 최대 1.4
+- **설정 파일 중요도**: `package.json`, `Dockerfile`, `tsconfig.json`, `vite.config.ts` 등 → 최대 1.0
+- **핵심 경로 보너스**: `src/` 1.2, `core/` 1.25, `components/` / `app/` 1.15
+- **테스트/문서 디스카운트**: `tests/` 0.3, `docs/` 0.4
 
 ### 🎯 최종 통합 점수 계산
 ```python
@@ -223,10 +229,10 @@ final_importance = (
 ```
 
 ### 💡 면접 질문 생성 활용
-- **상위 20% 파일**: 핵심 아키텍처 설계 질문
+- **선별된 핵심 파일**: 핵심 아키텍처 설계 질문
 - **고복잡도 파일**: 코드 리뷰 및 리팩토링 전략
-- **높은 중심성**: 의존성 관리 및 모듈 설계 
-- **활발한 변경**: 유지보수 및 협업 프로세스
+- **높은 중심성 파일**: 의존성 관리 및 모듈 설계
+- **변경 이력/핫스팟 신호**: 유지보수 및 협업 프로세스 질문
 
 ---
 
@@ -234,18 +240,18 @@ final_importance = (
 
 ### 1️⃣ 저장소 분석
 1. [라이브 데모](https://tgv.oursophy.com/) 접속
-2. **API 키 설정** 버튼 클릭 → GitHub 토큰, Google API 키 입력
+2. **API 키 설정** 버튼 클릭 → Upstage 또는 Google API 키 입력, 필요 시 GitHub 토큰 추가
 3. GitHub 저장소 URL 입력 (예: `https://github.com/facebook/react`)
 4. **분석 시작** 버튼 클릭
 
 ### 2️⃣ 분석 결과 확인
-- 📊 **기술 스택 분포**: 프로젝트에서 사용된 언어/기술 비율
-- 📁 **파일 중요도**: SmartFileImportanceAnalyzer 기반 4차원 분석
-- 🎯 **복잡도 점수**: 0-10점 스케일 코드 복잡도 평가
+- 📊 **기술 스택 요약**: 프로젝트에서 감지된 언어/기술 비율
+- 📁 **핵심 파일 및 저장소 정보**: SmartFileImportanceAnalyzer 기반 선별 결과
+- 🧭 **질문/코드 그래프/레거시 상세 대시보드**: 현재 기본 대시보드는 질문과 코드 그래프 중심
 
 ### 3️⃣ AI 질문 생성 & 모의면접
 - ❓ **맞춤형 질문**: 분석 결과 기반 기술면접 질문 자동 생성
-- 💬 **실시간 면접**: 질문에 답변하고 즉시 AI 피드백 받기
+- 💬 **면접 세션 진행**: 질문에 답변하고 즉시 AI 피드백 받기
 - 📈 **진행률 추적**: 질문별 답변 완료도 시각화
 
 ## 🧪 개발 & 테스트
